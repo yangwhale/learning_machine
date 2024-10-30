@@ -8,12 +8,12 @@ import optax
 import jax
 from jax.sharding import PartitionSpec as P, NamedSharding
 
-SEQLEN = 8192
+SEQLEN = 2048
 
 
 def fake_dataloader(size):
   for _ in range(size):
-    yield torch.randint(0, 32000, (8192, )), torch.randint(0, 32000, (8192, ))
+    yield torch.randint(0, 32000, (8, SEQLEN), device='cpu'), torch.randint(0, 32000, (8, SEQLEN), device='cpu')
 
 def group_data(dataloader, block_size):
     """yields tuple of inputs, label with seqlen == block_size"""
@@ -23,16 +23,14 @@ def group_data(dataloader, block_size):
     labels = []
 
     for line in dataloader:
-        x, y = line['input_ids'], line['labels']
+        x, y = line #line['input_ids'], line['labels']
         inputs.append(x)
         labels.append(y)
-        batch, seqlen = x.shape
+        seqlen = x.shape[1]
         tally += seqlen
-        if tally > block_size:
+        if tally >= block_size:
             inputs_stacked = torch.concat(inputs, dim=-1)
-            inputs_stacked.resize_((batch, block_size))
             labels_stacked = torch.concat(labels, dim=-1)
-            labels_stacked.resize_((batch, block_size))
             yield inputs_stacked, labels_stacked
             tally = 0
             inputs = []
@@ -61,16 +59,19 @@ def make_train_step(model, loss_fn, optax_optimizer):
 
   def loss(weights, args, label): # inputs are XLATensor
     with env:
-      res = torch.func.call_functional(model, weights,  args)
-      l = loss_fn(res, label)
+      res = torch.func.functional_call(model, weights,  args)
+      num_tokens = res.shape[-1]
+      flattened = res.reshape(-1, num_tokens)
+      label = label.reshape(-1)
+      l = loss_fn(flattened, label)
       return l
 
   jloss = interop.jax_view(loss)
-  grad_fn = jax.grad_and_value(jloss)
+  grad_fn = jax.value_and_grad(jloss)
 
   @functools.partial(
     jax.jit,
-    donate_argnums=(0, 1, 4)
+    donate_argnums=(0, 1)
   )
   def step(weights, opt_state, args, label): #inputs are array
     with jax.named_scope('compute_gradient'):
@@ -103,7 +104,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
   )
 
   def _expand_input(input_seq):
-    seqlen = input_seq.shape[0]
+    seqlen = input_seq.shape[1]
     freqs_cis = input_freqs_cis[:seqlen]
     mask = torch.full((seqlen, seqlen), float("-inf"), device='cpu')
     mask = torch.triu(mask, diagonal=1)
@@ -123,7 +124,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
     with jax.default_device(jax.devices('cpu')[0]):
       xj = env.to_xla(x).jax()
     xj = jax.make_array_from_callback(
-      xj.shape, fsdp_sharding, lambda a: xj
+      xj.shape, replicated_sharding, lambda a: xj
     )
     return xj
 
@@ -133,6 +134,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
     inputs, labels = item
 
     input_seq, pos, freqs_cis, mask = _expand_input(inputs)
+
     input_seq = _shard_first_dim(input_seq)
     freqs_cis = _replicate(freqs_cis)
     mask = _replicate(mask)
@@ -142,7 +144,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
 
     step_start = time.perf_counter()
     loss, jax_params, opt_state = train_step(
-        jax_params, opt_state, inputs, labels)
+        jax_params, opt_state, (input_seq, pos, freqs_cis, mask), labels)
     jax.block_until_ready((loss, jax_params))
     step_end = time.perf_counter()
     print(i, 'loss', loss, 'step latency: ', step_end - step_start)

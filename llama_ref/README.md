@@ -21,3 +21,12 @@ Useful commands:
   To monitor autoscaling:
     ray exec cluster.yaml 'tail -n 100 -f /tmp/ray/session_latest/logs/monitor*'
 
+## Build docker
+```
+sudo docker build --network=host -t torchxla2 .
+```
+
+## Run docker
+```
+sudo docker run --net=host --privileged -it torchxla2
+```

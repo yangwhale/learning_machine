@@ -83,7 +83,10 @@ def sharded_device_put(tensor, sharding):
 def main():
   torch.manual_seed(0)
   print(jax.local_devices())
-  mesh = jax.make_mesh((4, 4), ('fsdp', 'tp'))
+  TP = 4
+  fsdp_size = len(jax.devices()) // TP
+  
+  mesh = jax.make_mesh((fsdp_size, TP), ('fsdp', 'tp'))
 
   args = model.ModelArgs()
   args.n_layers = 2
@@ -93,7 +96,8 @@ def main():
   llama = model.Transformer(args)
   sharded_weights = create_sharded_weights(llama, mesh)
 
-  freqs_cis = sharded_weights['freqs_cis']
+  freqs_cis = torch_xla2.default_env().j2t_iso(sharded_weights['freqs_cis'])
+  del sharded_weights['freqs_cis']
   train.train_loop(mesh, llama, sharded_weights, None, freqs_cis)
 
   # sharded_weights = torch_xla2.default_env().j2t_iso(sharded_weights)
