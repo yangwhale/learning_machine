@@ -3,6 +3,7 @@
 FROM python:3.10-slim-bullseye
 
 # Install system dependencies
+RUN apt-get update && apt-get upgrade -y
 RUN apt-get update && apt-get install -y curl gnupg
 
 # Add the Google Cloud SDK package repository
@@ -25,7 +26,7 @@ RUN pip install -e .[tpu] -f https://storage.googleapis.com/libtpu-releases/inde
 
 RUN mkdir /llama
 WORKDIR /llama
-COPY ./*.py .
+COPY ./*.py ./
 ENTRYPOINT ["python", "run.py"]
 
 

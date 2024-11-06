@@ -10,6 +10,26 @@ from jax.sharding import PartitionSpec as P, NamedSharding
 
 SEQLEN = 2048
 
+## Interface for optimizer_fn:
+# def optimizer_fn(optimizer_state, weights, gradients) -> new_optimizer_state, new_weights
+
+## Interface for loss_fn:
+## loss_fn(model_out, label) -> scalar
+
+class TraininableLlama:
+
+  def __init__(self, model):
+    self.orig_model = model
+
+  # Args is what dataloader gives
+  def call(self, weights, buffers, args, kwargs):
+    weights_and_buffers = copy.copy(weights)
+    weights_and_buffers.update(buffers)
+    return torch.func.call_functional(
+      self.orig_model, weights_and_buffers, args, kwargs)
+
+
+
 
 def fake_dataloader(size):
   for _ in range(size):
@@ -105,7 +125,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
 
   def _expand_input(input_seq):
     seqlen = input_seq.shape[1]
-    freqs_cis = input_freqs_cis[:seqlen]
+    freqs_cis = env.t2j_iso(input_freqs_cis[:seqlen])
     mask = torch.full((seqlen, seqlen), float("-inf"), device='cpu')
     mask = torch.triu(mask, diagonal=1)
     return (input_seq, 0, freqs_cis, mask)
@@ -128,15 +148,15 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
     )
     return xj
 
+  data_iter = group_data(fake_dataloader(1000), SEQLEN)
 
-
-  for i, item in enumerate(group_data(fake_dataloader(1000), SEQLEN)):
+  for i, item in enumerate(data_iter):
     inputs, labels = item
 
     input_seq, pos, freqs_cis, mask = _expand_input(inputs)
 
     input_seq = _shard_first_dim(input_seq)
-    freqs_cis = _replicate(freqs_cis)
+    freqs_cis = freqs_cis
     mask = _replicate(mask)
     labels = _shard_first_dim(labels)
 

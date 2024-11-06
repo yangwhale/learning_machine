@@ -54,6 +54,45 @@ class ModelArgs:
 # dependencies. These dependencies are not part of the default dependencies
 # (requirements.txt) of the `llama-models` package.
 
+transformer_configs = {
+    "8B": {
+        "dim": 4096,
+        "ffn_dim_multiplier": 1.3,
+        "multiple_of": 1024,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "n_layers": 32,
+        "norm_eps": 1e-05,
+        "rope_theta": 500000.0,
+        "use_scaled_rope": true,
+        "vocab_size": 128256
+    },
+    "70B": {
+        "dim": 8192,
+        "ffn_dim_multiplier": 1.3,
+        "multiple_of": 4096,
+        "n_heads": 64,
+        "n_kv_heads": 8,
+        "n_layers": 80,
+        "norm_eps": 1e-05,
+        "rope_theta": 500000.0,
+        "use_scaled_rope": true,
+        "vocab_size": 128256
+    },
+    "405B": {
+        "dim": 16384,
+        "ffn_dim_multiplier": 1.2,
+        "multiple_of": 4096,
+        "n_heads": 128,
+        "n_kv_heads": 16,
+        "n_layers": 126,
+        "norm_eps": 1e-05,
+        "rope_theta": 500000.0,
+        "use_scaled_rope": true,
+        "vocab_size": 128256
+    }
+}
+
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -143,7 +182,7 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        self.n_local_heads = args.n_heads 
+        self.n_local_heads = args.n_heads
         self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
@@ -186,7 +225,7 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         keys = xk
-        values = xv 
+        values = xv
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(
@@ -226,13 +265,13 @@ class FeedForward(nn.Module):
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
         self.w1 = nn.Linear(
-            dim, hidden_dim, bias=False, 
+            dim, hidden_dim, bias=False,
         )
         self.w2 = nn.Linear(
-            hidden_dim, dim, bias=False, 
+            hidden_dim, dim, bias=False,
         )
         self.w3 = nn.Linear(
-            dim, hidden_dim, bias=False, 
+            dim, hidden_dim, bias=False,
         )
 
     def forward(self, x):
@@ -285,7 +324,7 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(
-            params.dim, params.vocab_size, bias=False, 
+            params.dim, params.vocab_size, bias=False,
         )
 
         freqs_cis = precompute_freqs_cis(

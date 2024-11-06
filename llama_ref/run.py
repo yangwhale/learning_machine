@@ -89,7 +89,7 @@ def main():
   mesh = jax.make_mesh((fsdp_size, TP), ('fsdp', 'tp'))
 
   args = model.ModelArgs()
-  args.n_layers = 2
+  #args.n_layers = 2
   args.vocab_size = 32000
 
   torch.set_default_device('meta')
@@ -99,46 +99,6 @@ def main():
   freqs_cis = torch_xla2.default_env().j2t_iso(sharded_weights['freqs_cis'])
   del sharded_weights['freqs_cis']
   train.train_loop(mesh, llama, sharded_weights, None, freqs_cis)
-
-  # sharded_weights = torch_xla2.default_env().j2t_iso(sharded_weights)
-  # env = torch_xla2.default_env()
-
-  # def llama_func(weights, args):
-  #   with env:
-  #     return torch.func.functional_call(llama, weights, args)
-
-  # jitted = torch_xla2.compile(llama_func)
-
-
-  # #with env:
-  #   # llama.to('jax')
-  #   # compiled = torch_xla2.compile(llama)
-  # replicated_sharding = NamedSharding(mesh, P())
-  # tokens = torch.ones((1, 100), device='cpu', dtype=torch.int32)
-  # freqs_cis = sharded_weights['freqs_cis'][0: 100]
-  # seqlen=100
-  # mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
-  # mask = torch.triu(mask, diagonal=1)
-  # start_pos = 0
-  # # https://github.com/pytorch/pytorch/issues/100005
-  # # torch.triu is buggy when the device is mps: filled values are 
-  # # nan instead of 0. 
-  # # When performing key-value caching, we compute the attention scores
-  # # only for the new sequence. Thus, the matrix of scores is of size
-  # # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-  # # j > cache_len + i, since row i corresponds to token cache_len + i.
-  # mask = torch.hstack(
-  #     [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
-  # )
-  # with jax.default_device(jax.devices('cpu')[0]):
-  #   (tokens, freqs_cis, mask) = env.to_xla((tokens, freqs_cis, mask))
-
-  # tokensj = jax.make_array_from_callback(tokens.shape, replicated_sharding, lambda a: tokens.jax())
-  # maskj = jax.make_array_from_callback(mask.shape, replicated_sharding, lambda a: mask.jax())
-
-  # print(jitted(sharded_weights, 
-  #              (env.j2t_iso(tokensj), 0, freqs_cis, env.j2t_iso(maskj))
-  #       ))
 
 
 if __name__ == '__main__':

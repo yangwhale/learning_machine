@@ -23,7 +23,13 @@ Useful commands:
 
 ## Build docker
 ```
-sudo docker build --network=host -t torchxla2 .
+sudo docker build --network=host -t llama3 .
+sudo docker tag llama3 gcr.io/tpu-pytorch/llama3:latest
+sudo docker push gcr.io/tpu-pytorch/llama3:latest
+```
+
+```
+gcloud compute tpus tpu-vm ssh --zone "us-central2-b" "ray-hanq-ray-cluster-worker-b3686b6a-tpu" --project "tpu-pytorch" --worker=all --command="sudo docker run --net=host --pull=always --privileged gcr.io/tpu-pytorch/llama3:latest"
 ```
 
 ## Run docker
