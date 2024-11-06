@@ -31,9 +31,10 @@ class TraininableLlama:
 
 
 
-def fake_dataloader(size):
+def fake_dataloader(size, seqlen):
   for _ in range(size):
-    yield torch.randint(0, 32000, (8, SEQLEN), device='cpu'), torch.randint(0, 32000, (8, SEQLEN), device='cpu')
+    x = torch.randint(0, 32000, (8, seqlen), device='cpu')
+    yield x, (x + 1) % 32000
 
 def group_data(dataloader, block_size):
     """yields tuple of inputs, label with seqlen == block_size"""
@@ -108,7 +109,7 @@ def make_train_step(model, loss_fn, optax_optimizer):
 
 
 
-def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
+def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
   jax.profiler.start_trace('/tmp/tensorboard')
   print('start training')
   min_loop_time = 10000
@@ -116,7 +117,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
   env = torch_xla2.default_env()
 
   jax_params = env.t2j_iso(weights)
-  jax_optimizer = optax.adamw(0.01)
+  jax_optimizer = optax.adamw(lr)
   opt_state = jax_optimizer.init(jax_params)
   train_step = make_train_step(model, 
     loss_fn=torch.nn.CrossEntropyLoss(), 
@@ -148,7 +149,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
     )
     return xj
 
-  data_iter = group_data(fake_dataloader(1000), SEQLEN)
+  data_iter = group_data(fake_dataloader(1000, seqlen), seqlen)
 
   for i, item in enumerate(data_iter):
     inputs, labels = item
@@ -170,7 +171,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis):
     print(i, 'loss', loss, 'step latency: ', step_end - step_start)
     min_loop_time =  min(min_loop_time, step_end - step_start)
     print('======')
-    if i >= 3:
+    if i >= 6:
         break
   
   jax.profiler.stop_trace()

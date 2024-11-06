@@ -32,7 +32,7 @@ class ModelArgs:
     use_scaled_rope: bool = False
 
     max_batch_size: int = 32
-    max_seq_len: int = 2048
+    max_seq_len: int = 8192
 
     # vision model params
     vision_chunk_size: int = -1  # image resolution for image models
@@ -64,7 +64,7 @@ transformer_configs = {
         "n_layers": 32,
         "norm_eps": 1e-05,
         "rope_theta": 500000.0,
-        "use_scaled_rope": true,
+        "use_scaled_rope": True,
         "vocab_size": 128256
     },
     "70B": {
@@ -76,7 +76,7 @@ transformer_configs = {
         "n_layers": 80,
         "norm_eps": 1e-05,
         "rope_theta": 500000.0,
-        "use_scaled_rope": true,
+        "use_scaled_rope": True,
         "vocab_size": 128256
     },
     "405B": {
@@ -88,7 +88,7 @@ transformer_configs = {
         "n_layers": 126,
         "norm_eps": 1e-05,
         "rope_theta": 500000.0,
-        "use_scaled_rope": true,
+        "use_scaled_rope": True,
         "vocab_size": 128256
     }
 }
@@ -240,11 +240,11 @@ class Attention(nn.Module):
         values = values.transpose(
             1, 2
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+
+        output = torch.nn.functional.scaled_dot_product_attention(
+            xq, keys, values, is_causal=(mask is not None)
+        )
+
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
@@ -327,13 +327,6 @@ class Transformer(nn.Module):
             params.dim, params.vocab_size, bias=False,
         )
 
-        freqs_cis = precompute_freqs_cis(
-            params.dim // params.n_heads,
-            params.max_seq_len * 2,
-            params.rope_theta,
-            params.use_scaled_rope,
-        )
-        self.register_buffer('freqs_cis', freqs_cis)
 
     def forward(self, tokens: torch.Tensor, start_pos: int, freqs_cis, mask):
         _bsz, seqlen = tokens.shape

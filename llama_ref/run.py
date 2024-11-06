@@ -58,11 +58,14 @@ def create_sharded_weights(model, mesh):
   for name, weight_meta in model.state_dict().items():
     sharding = NamedSharding(mesh, P(*get_sharding(name)))
     with jax.default_device(jax.devices('cpu')[0]):
-      weight = jnp.ones(
+      weight_torch = torch.randn(
         weight_meta.shape, 
-        dtype=mappings.t2j_dtype(weight_meta.dtype))
-    print(name, weight.shape, weight.dtype)
-    res[name] = jax.device_put(weight, sharding)
+        dtype=weight_meta.dtype)
+      weight_jax = torch_xla2.default_env().to_xla(weight_torch).jax()
+    #print(name, weight.shape, weight.dtype)
+    res[name] = jax.make_array_from_callback(
+      weight_jax.shape, sharding, lambda a: weight_jax[a]
+    )
   return res
 
 def sharded_device_put(tensor, sharding):
@@ -80,26 +83,47 @@ def sharded_device_put(tensor, sharding):
   
 
 
-def main():
+def main(
+  model_type: str='8B',
+  lr: float=0.001,
+  tp: int=4,
+  seqlen: int = 2048,
+):
   torch.manual_seed(0)
+  torch.set_default_dtype(torch.bfloat16)
   print(jax.local_devices())
-  TP = 4
-  fsdp_size = len(jax.devices()) // TP
+  fsdp_size = len(jax.devices()) // tp
   
-  mesh = jax.make_mesh((fsdp_size, TP), ('fsdp', 'tp'))
+  mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
 
-  args = model.ModelArgs()
+  args = model.ModelArgs(
+    **model.transformer_configs[model_type]
+  )
   #args.n_layers = 2
-  args.vocab_size = 32000
 
-  torch.set_default_device('meta')
-  llama = model.Transformer(args)
+  with torch.device('meta'):
+    llama = model.Transformer(args)
   sharded_weights = create_sharded_weights(llama, mesh)
+  with torch.device('cpu'):
+    freqs_cis = model.precompute_freqs_cis(
+        args.dim // args.n_heads,
+        args.max_seq_len * 2,
+        args.rope_theta,
+        args.use_scaled_rope,
+    ).numpy()
+  sharding = NamedSharding(mesh, P()) # replicated
 
-  freqs_cis = torch_xla2.default_env().j2t_iso(sharded_weights['freqs_cis'])
-  del sharded_weights['freqs_cis']
-  train.train_loop(mesh, llama, sharded_weights, None, freqs_cis)
+  env = torch_xla2.default_env()
+  freqs_cis = env.j2t_iso(jax.device_put(freqs_cis, sharding))
+
+  env.config.use_tpu_flash_attention = True
+  env.config.shmap_flash_attention = True
+  env._mesh = mesh
+
+
+  train.train_loop(mesh, llama, sharded_weights, None, freqs_cis, lr, seqlen)
 
 
 if __name__ == '__main__':
-  main()
+  import fire
+  fire.Fire(main)

@@ -20,7 +20,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python
 RUN git clone https://github.com/pytorch/xla.git
 WORKDIR xla/experimental/torch_xla2
 RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-RUN pip install optax
+RUN pip install optax fire
 RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 RUN pip install -e .[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
 
@@ -28,6 +28,7 @@ RUN mkdir /llama
 WORKDIR /llama
 COPY ./*.py ./
 ENTRYPOINT ["python", "run.py"]
+CMD ["--lr=0.001", "--model_type=8B"]
 
 
 
