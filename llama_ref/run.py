@@ -3,12 +3,13 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P, NamedSharding
 import torch
 import model
+import model_with_scan
 import train
 import torch_xla2
 from torch_xla2.ops import mappings
 
 
-sharding_map = {
+sharding_map_original = {
   "freqs_cis" : (), #  torch.complex64 (2048, 64)
   "tok_embeddings.weight" : ('tp', 'fsdp'), #  torch.float32 (vocab_size, 4096)
   "layers.*.attention.wo.weight" : ('fsdp', 'tp'), #  torch.int8 (4096, 4096)
@@ -20,6 +21,22 @@ sharding_map = {
   "layers.*.feed_forward.w3.weight": ('tp', 'fsdp'), #  torch.float32 (11008, 4096)
   "layers.*.attention_norm.weight" : ('fsdp', ), #  torch.float32 (4096,)
   "layers.*.ffn_norm.weight" : ('fsdp', ), #  torch.float32 (4096,)
+  "norm.weight" : ('fsdp', ), #  torch.float32 (4096,)
+  "output.weight" : ('tp', 'fsdp'), #  torch.float32 (vocab_size, 4096)
+}
+
+sharding_map_scan = {
+  "freqs_cis" : (), #  torch.complex64 (2048, 64)
+  "tok_embeddings.weight" : ('tp', 'fsdp'), #  torch.float32 (vocab_size, 4096)
+  "layers.params.attention___wo___weight" : (None, 'fsdp', 'tp'), #  torch.int8 (n, 4096, 4096)
+  "layers.params.attention___wq___weight" : (None, 'tp', 'fsdp'), #  torch.int8 (n, 4096, 4096)
+  "layers.params.attention___wk___weight" : (None, 'tp', 'fsdp'), #  torch.int8 (n, 4096, 4096)
+  "layers.params.attention___wv___weight" : (None, 'tp', 'fsdp'), #  torch.int8 (n, 4096, 4096)
+  "layers.params.feed_forward___w1___weight" : (None, 'tp', 'fsdp'), #  torch.float32 (n, 11008, 4096)
+  "layers.params.feed_forward___w2___weight" : (None, 'fsdp', 'tp'), #  torch.float32 (n, 4096, 11008)
+  "layers.params.feed_forward___w3___weight": (None, 'tp', 'fsdp'), #  torch.float32 (n, 11008, 4096)
+  "layers.params.attention_norm___weight" : (None, 'fsdp', ), #  torch.float32 (n, 4096,)
+  "layers.params.ffn_norm___weight" : (None, 'fsdp', ), #  torch.float32 (n, 4096,)
   "norm.weight" : ('fsdp', ), #  torch.float32 (4096,)
   "output.weight" : ('tp', 'fsdp'), #  torch.float32 (vocab_size, 4096)
 }
@@ -46,17 +63,15 @@ def _process_sharding_name(name):
   return ".".join(tokens)
 
 
-def get_sharding(name):
-  name = _process_sharding_name(name)
-  shard_axis = sharding_map[name]
-  return shard_axis
 
-
-
-def create_sharded_weights(model, mesh):
+def create_sharded_weights(model, mesh, sharding_map):
   res = {}
   for name, weight_meta in model.state_dict().items():
-    sharding = NamedSharding(mesh, P(*get_sharding(name)))
+    sharding_spec = sharding_map.get(_process_sharding_name(name))
+    if sharding_spec is None:
+      print('Skipping weight:', name)
+      continue
+    sharding = NamedSharding(mesh, P(*sharding_spec))
     with jax.default_device(jax.devices('cpu')[0]):
       weight_torch = torch.randn(
         weight_meta.shape, 
@@ -88,13 +103,13 @@ def main(
   lr: float=0.001,
   tp: int=4,
   seqlen: int = 2048,
+  use_scan: bool = True,
 ):
   torch.manual_seed(0)
   torch.set_default_dtype(torch.bfloat16)
   print(jax.local_devices())
   fsdp_size = len(jax.devices()) // tp
   
-  mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
 
   args = model.ModelArgs(
     **model.transformer_configs[model_type]
@@ -102,8 +117,15 @@ def main(
   #args.n_layers = 2
 
   with torch.device('meta'):
-    llama = model.Transformer(args)
-  sharded_weights = create_sharded_weights(llama, mesh)
+    if use_scan:
+      sharding_map = sharding_map_scan
+      llama = model_with_scan.Transformer(args)
+    else:
+      sharding_map = sharding_map_original
+      llama = model.Transformer(args)
+
+  mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
+  sharded_weights = create_sharded_weights(llama, mesh, sharding_map)
   with torch.device('cpu'):
     freqs_cis = model.precompute_freqs_cis(
         args.dim // args.n_heads,

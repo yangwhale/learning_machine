@@ -72,12 +72,16 @@ def sharded_device_put(tensor, sharding):
     return jax.make_array_from_single_device_arrays(shape, sharding, x_split)
 
 
-
+# NOTE: this line makes jax.remat able to take torch functions
+remat = interop.torch_view(jax.remat)
 
 def make_train_step(model, loss_fn, optax_optimizer):
 
   env = torch_xla2.default_env()
 
+  @functools.partial(
+    remat, 
+    policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
   def loss(weights, args, label): # inputs are XLATensor
     with env:
       res = torch.func.functional_call(model, weights,  args)
@@ -110,7 +114,6 @@ def make_train_step(model, loss_fn, optax_optimizer):
 
 
 def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
-  jax.profiler.start_trace('/tmp/tensorboard')
   print('start training')
   min_loop_time = 10000
 
@@ -151,6 +154,8 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
 
   data_iter = group_data(fake_dataloader(1000, seqlen), seqlen)
 
+
+
   for i, item in enumerate(data_iter):
     inputs, labels = item
 
@@ -163,18 +168,22 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
 
     print('INPUT shape', inputs.shape)
 
+    if i == 5:
+      jax.profiler.start_trace('/tmp/llama3')
     step_start = time.perf_counter()
     loss, jax_params, opt_state = train_step(
         jax_params, opt_state, (input_seq, pos, freqs_cis, mask), labels)
     jax.block_until_ready((loss, jax_params))
     step_end = time.perf_counter()
+    if i == 6:
+      jax.profiler.stop_trace()
+
     print(i, 'loss', loss, 'step latency: ', step_end - step_start)
     min_loop_time =  min(min_loop_time, step_end - step_start)
     print('======')
     if i >= 6:
         break
   
-  jax.profiler.stop_trace()
   return min_loop_time
 
 
