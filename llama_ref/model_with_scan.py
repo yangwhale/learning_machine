@@ -21,6 +21,8 @@ from dataclasses import dataclass
 import jax
 from torch_xla2 import interop
 
+from jax.ad_checkpoint import checkpoint_name
+
 @dataclass
 class ModelArgs:
     dim: int = 4096
