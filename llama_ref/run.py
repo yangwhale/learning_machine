@@ -7,6 +7,8 @@ import model_with_scan
 import train
 import torch_xla2
 from torch_xla2.ops import mappings
+import custom_mesh
+from jax.sharding import Mesh
 
 
 sharding_map_original = {
@@ -104,12 +106,21 @@ def main(
   tp: int=4,
   seqlen: int = 2048,
   use_scan: bool = True,
+  use_custom_mesh: bool = False,
 ):
   torch.manual_seed(0)
   torch.set_default_dtype(torch.bfloat16)
   print(jax.local_devices())
   fsdp_size = len(jax.devices()) // tp
-  
+
+  if use_custom_mesh:
+    assert len(jax.devices()) == 512
+    dev_array = custom_mesh.create_custom_64x4_device_mesh(
+      (64, 4), (2, 1), jax.devices()
+    )
+    mesh = Mesh(dev_array, ('fsdp', 'tp'))
+  else:
+    mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
 
   args = model.ModelArgs(
     **model.transformer_configs[model_type]
@@ -124,7 +135,6 @@ def main(
       sharding_map = sharding_map_original
       llama = model.Transformer(args)
 
-  mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
   sharded_weights = create_sharded_weights(llama, mesh, sharding_map)
   with torch.device('cpu'):
     freqs_cis = model.precompute_freqs_cis(

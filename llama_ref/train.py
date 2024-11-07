@@ -111,8 +111,6 @@ def make_train_step(model, loss_fn, optax_optimizer):
   return step
 
 
-
-
 def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
   print('start training')
   min_loop_time = 10000

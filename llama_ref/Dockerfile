@@ -27,6 +27,7 @@ RUN pip install -e .[tpu] -f https://storage.googleapis.com/libtpu-releases/inde
 RUN mkdir /llama
 WORKDIR /llama
 COPY ./*.py ./
+ENV LIBTPU_INIT_ARGS "--xla_tpu_scoped_vmem_limit_kib=98304 --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_decompose_all_gather_einsum=true --xla_tpu_decompose_einsum_reduce_scatter=true --xla_tpu_use_enhanced_launch_barrier=true --xla_tpu_spmd_rng_bit_generator_unsafe=true"
 ENTRYPOINT ["python", "run.py"]
 CMD ["--lr=0.001", "--model_type=8B"]
 
