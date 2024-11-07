@@ -31,9 +31,9 @@ class TraininableLlama:
 
 
 
-def fake_dataloader(size, seqlen):
+def fake_dataloader(size, seqlen, batch_size):
   for _ in range(size):
-    x = torch.randint(0, 32000, (8, seqlen), device='cpu')
+    x = torch.randint(0, 32000, (batch_size, seqlen), device='cpu')
     yield x, (x + 1) % 32000
 
 def group_data(dataloader, block_size):
@@ -111,7 +111,8 @@ def make_train_step(model, loss_fn, optax_optimizer, policy):
   return step
 
 
-def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen, policy):
+def train_loop(mesh, model, weights, data_loader, 
+    input_freqs_cis, lr, seqlen, policy, batch_size):
   print('start training')
   min_loop_time = 10000
 
@@ -151,7 +152,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen, p
     )
     return xj
 
-  data_iter = group_data(fake_dataloader(1000, seqlen), seqlen)
+  data_iter = group_data(fake_dataloader(1000, seqlen, batch_size), seqlen)
 
 
 
