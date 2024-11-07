@@ -75,13 +75,13 @@ def sharded_device_put(tensor, sharding):
 # NOTE: this line makes jax.remat able to take torch functions
 remat = interop.torch_view(jax.remat)
 
-def make_train_step(model, loss_fn, optax_optimizer):
+def make_train_step(model, loss_fn, optax_optimizer, policy):
 
   env = torch_xla2.default_env()
 
   @functools.partial(
     remat, 
-    policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims)
+    policy=policy)
   def loss(weights, args, label): # inputs are XLATensor
     with env:
       res = torch.func.functional_call(model, weights,  args)
@@ -111,7 +111,7 @@ def make_train_step(model, loss_fn, optax_optimizer):
   return step
 
 
-def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
+def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen, policy):
   print('start training')
   min_loop_time = 10000
 
@@ -123,6 +123,7 @@ def train_loop(mesh, model, weights, data_loader, input_freqs_cis, lr, seqlen):
   train_step = make_train_step(model, 
     loss_fn=torch.nn.CrossEntropyLoss(), 
     optax_optimizer=jax_optimizer,
+    policy=policy,
   )
 
   def _expand_input(input_seq):

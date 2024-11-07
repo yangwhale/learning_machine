@@ -227,6 +227,10 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        xq = interop.call_jax(checkpoint_name, xq, 'query_proj')
+        xk = interop.call_jax(checkpoint_name, xk, 'key_proj')
+        xv = interop.call_jax(checkpoint_name, xv, 'value_proj')
+
         keys = xk
         values = xv
 
@@ -278,7 +282,13 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        wi1 = self.w1(x)
+        wi3 = self.w3(x)
+        wi1 = interop.call_jax(checkpoint_name, wi1, 'mlpwi')
+        wi3 = interop.call_jax(checkpoint_name, wi3, 'mlpwi')
+        output = self.w2(F.silu(wi1) * wi3)
+        output = interop.call_jax(checkpoint_name, output, 'mlpwo')
+        return output
 
 
 class TransformerBlock(nn.Module):
@@ -305,6 +315,7 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
+        x = interop.call_jax(checkpoint_name, x, 'decode_layer_input')
         h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
@@ -397,5 +408,5 @@ class Transformer(nn.Module):
         h = self.tok_embeddings(tokens)
         h = self.layers(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
-        output = self.output(h).float()
+        output = self.output(h)
         return output

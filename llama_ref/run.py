@@ -45,45 +45,45 @@ sharding_map_scan = {
 
 
 def _process_sharding_name(name):
-  """Replace integers in param name with *.
+    """Replace integers in param name with *.
 
   Presumably all layers should have the same sharding.
   """
 
-  def is_integer(t):
-    try:
-      int(t)
-      return True
-    # pylint: disable-next=all
-    except:  # noqa: E722
-      return False
+    def is_integer(t):
+        try:
+            int(t)
+            return True
+        # pylint: disable-next=all
+        except:  # noqa: E722
+            return False
 
-  tokens = name.split(".")
-  for i, t in enumerate(tokens):
-    if is_integer(t):
-      tokens[i] = "*"
-  return ".".join(tokens)
+    tokens = name.split(".")
+    for i, t in enumerate(tokens):
+        if is_integer(t):
+            tokens[i] = "*"
+    return ".".join(tokens)
 
 
 
 def create_sharded_weights(model, mesh, sharding_map):
-  res = {}
-  for name, weight_meta in model.state_dict().items():
-    sharding_spec = sharding_map.get(_process_sharding_name(name))
-    if sharding_spec is None:
-      print('Skipping weight:', name)
-      continue
-    sharding = NamedSharding(mesh, P(*sharding_spec))
-    with jax.default_device(jax.devices('cpu')[0]):
-      weight_torch = torch.randn(
-        weight_meta.shape, 
-        dtype=weight_meta.dtype)
-      weight_jax = torch_xla2.default_env().to_xla(weight_torch).jax()
-    #print(name, weight.shape, weight.dtype)
-    res[name] = jax.make_array_from_callback(
-      weight_jax.shape, sharding, lambda a: weight_jax[a]
-    )
-  return res
+    res = {}
+    for name, weight_meta in model.state_dict().items():
+        sharding_spec = sharding_map.get(_process_sharding_name(name))
+        if sharding_spec is None:
+            print('Skipping weight:', name)
+            continue
+        sharding = NamedSharding(mesh, P(*sharding_spec))
+        with jax.default_device(jax.devices('cpu')[0]):
+            weight_torch = torch.randn(
+              weight_meta.shape,
+              dtype=weight_meta.dtype)
+            weight_jax = torch_xla2.default_env().to_xla(weight_torch).jax()
+        #print(name, weight.shape, weight.dtype)
+        res[name] = jax.make_array_from_callback(
+          weight_jax.shape, sharding, lambda a: weight_jax[a]
+        )
+    return res
 
 def sharded_device_put(tensor, sharding):
     num_global_devices = jax.device_count()
@@ -97,7 +97,7 @@ def sharded_device_put(tensor, sharding):
     shape = tensor.shape
     x_split = [jax.device_put(tensor[i], device) for device, i in sharding.addressable_devices_indices_map(shape).items()]
     return jax.make_array_from_single_device_arrays(shape, sharding, x_split)
-  
+
 
 
 def main(
@@ -107,55 +107,72 @@ def main(
   seqlen: int = 2048,
   use_scan: bool = True,
   use_custom_mesh: bool = False,
+  use_custom_offload: bool = True,
 ):
-  torch.manual_seed(0)
-  torch.set_default_dtype(torch.bfloat16)
-  print(jax.local_devices())
-  fsdp_size = len(jax.devices()) // tp
+    torch.manual_seed(0)
+    torch.set_default_dtype(torch.bfloat16)
+    print(jax.local_devices())
+    fsdp_size = len(jax.devices()) // tp
 
-  if use_custom_mesh:
-    assert len(jax.devices()) == 512
-    dev_array = custom_mesh.create_custom_64x4_device_mesh(
-      (64, 4), (2, 1), jax.devices()
-    )
-    mesh = Mesh(dev_array, ('fsdp', 'tp'))
-  else:
-    mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
-
-  args = model.ModelArgs(
-    **model.transformer_configs[model_type]
-  )
-  #args.n_layers = 2
-
-  with torch.device('meta'):
-    if use_scan:
-      sharding_map = sharding_map_scan
-      llama = model_with_scan.Transformer(args)
+    if use_custom_mesh:
+        assert len(jax.devices()) == 512
+        dev_array = custom_mesh.create_custom_64x4_device_mesh(
+          (64, 4), (2, 1), jax.devices()
+        )
+        mesh = Mesh(dev_array, ('fsdp', 'tp'))
     else:
-      sharding_map = sharding_map_original
-      llama = model.Transformer(args)
+        mesh = jax.make_mesh((fsdp_size, tp), ('fsdp', 'tp'))
 
-  sharded_weights = create_sharded_weights(llama, mesh, sharding_map)
-  with torch.device('cpu'):
-    freqs_cis = model.precompute_freqs_cis(
-        args.dim // args.n_heads,
-        args.max_seq_len * 2,
-        args.rope_theta,
-        args.use_scaled_rope,
-    ).numpy()
-  sharding = NamedSharding(mesh, P()) # replicated
+    if use_custom_offload:
+      policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+          names_which_can_be_saved=[],
+          names_which_can_be_offloaded=[
+              "decoder_layer_input",
+              "query_proj",
+              "key_proj",
+              "value_proj",
+              "out_proj",
+          ],
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+    else:
+      policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
 
-  env = torch_xla2.default_env()
-  freqs_cis = env.j2t_iso(jax.device_put(freqs_cis, sharding))
+    args = model.ModelArgs(
+      **model.transformer_configs[model_type]
+    )
+    #args.n_layers = 2
 
-  env.config.use_tpu_flash_attention = True
-  env.config.shmap_flash_attention = True
-  env._mesh = mesh
+    with torch.device('meta'):
+        if use_scan:
+            sharding_map = sharding_map_scan
+            llama = model_with_scan.Transformer(args)
+        else:
+            sharding_map = sharding_map_original
+            llama = model.Transformer(args)
+
+    sharded_weights = create_sharded_weights(llama, mesh, sharding_map)
+    with torch.device('cpu'):
+        freqs_cis = model.precompute_freqs_cis(
+            args.dim // args.n_heads,
+            args.max_seq_len * 2,
+            args.rope_theta,
+            args.use_scaled_rope,
+        ).numpy()
+    sharding = NamedSharding(mesh, P()) # replicated
+
+    env = torch_xla2.default_env()
+    freqs_cis = env.j2t_iso(jax.device_put(freqs_cis, sharding))
+
+    env.config.use_tpu_flash_attention = True
+    env.config.shmap_flash_attention = True
+    env._mesh = mesh
 
 
-  train.train_loop(mesh, llama, sharded_weights, None, freqs_cis, lr, seqlen)
+    train.train_loop(mesh, llama, sharded_weights, None, freqs_cis, lr, seqlen, policy)
 
 
 if __name__ == '__main__':
-  import fire
-  fire.Fire(main)
+    import fire
+    fire.Fire(main)
