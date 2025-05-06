@@ -10,6 +10,7 @@
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3/reference_impl/model.py
 
+import functools
 import math
 from typing import Optional, Tuple
 
@@ -17,6 +18,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from dataclasses import dataclass
+import jax
+from jax.sharding import PartitionSpec as P
+from torch_xla2 import interop
+
+from jax.ad_checkpoint import checkpoint_name
+
+all_gather = interop.torch_view(jax.lax.all_gather)
+all_reduce_sum = interop.torch_view(jax.lax.psum)
+
 
 @dataclass
 class ModelArgs:
@@ -33,7 +43,6 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 8192
-    tp_size: int = 1
 
     # vision model params
     vision_chunk_size: int = -1  # image resolution for image models
@@ -164,7 +173,6 @@ def apply_rotary_emb(
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    #return xq_out.type_as(xq), xk_out.type_as(xk)
     return xq_out.to(torch.bfloat16), xk_out.to(torch.bfloat16)
 
 
@@ -184,8 +192,8 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        self.n_local_heads = args.n_heads
-        self.n_local_kv_heads = self.n_kv_heads
+        self.n_local_heads = args.n_heads // args.tp_size
+        self.n_local_kv_heads = self.n_kv_heads // args.tp_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -226,6 +234,10 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        xq = interop.call_jax(checkpoint_name, xq, 'query_proj')
+        xk = interop.call_jax(checkpoint_name, xk, 'key_proj')
+        xv = interop.call_jax(checkpoint_name, xv, 'value_proj')
+
         keys = xk
         values = xv
 
@@ -248,7 +260,10 @@ class Attention(nn.Module):
         )
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(output)
+        out = self.wo(output)
+        out = all_reduce_sum(out, axis_name='tp')
+        out = interop.call_jax(checkpoint_name, out, 'out_proj')
+        return out
 
 
 class FeedForward(nn.Module):
@@ -277,7 +292,14 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        wi1 = self.w1(x)
+        wi3 = self.w3(x)
+        wi1 = interop.call_jax(checkpoint_name, wi1, 'mlpwi')
+        wi3 = interop.call_jax(checkpoint_name, wi3, 'mlpwi')
+        output = self.w2(F.silu(wi1) * wi3)
+        output = all_reduce_sum(output, axis_name='tp')
+        output = interop.call_jax(checkpoint_name, output, 'mlpwo')
+        return output
 
 
 class TransformerBlock(nn.Module):
@@ -304,13 +326,122 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
+        x = interop.call_jax(checkpoint_name, x, 'decoder_layer_input')
         h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
+#   "layers.*.attention.wo.weight" : ('fsdp', 'tp'), #  torch.int8 (4096, 4096)
+#   "layers.*.attention.wq.weight" : ('tp', 'fsdp'), #  torch.int8 (4096, 4096)
+#   "layers.*.attention.wk.weight" : ('tp', 'fsdp'), #  torch.int8 (4096, 4096)
+#   "layers.*.attention.wv.weight" : ('tp', 'fsdp'), #  torch.int8 (4096, 4096)
+#   "layers.*.feed_forward.w1.weight" : ('tp', 'fsdp'), #  torch.float32 (11008, 4096)
+#   "layers.*.feed_forward.w2.weight" : ('fsdp', 'tp'), #  torch.float32 (4096, 11008)
+#   "layers.*.feed_forward.w3.weight": ('tp', 'fsdp'), #  torch.float32 (11008, 4096)
+#   "layers.*.attention_norm.weight" : ('fsdp', ), #  torch.float32 (4096,)
+def _fsdp_axis(name):
+    if any(key in name for key in ('wq', 'wk', 'wv', 'w1', 'w3')):
+        return 1
+    else:
+        return 0
+
+
+class ScanLayer(nn.Module):
+
+    # requirement: submodule's return value must be the same type/shape as input
+    
+
+    def __init__(self, submodule: nn.Module, num_layers: int, unroll_layers: int):
+        super().__init__()
+        self.m = submodule
+        self.num_layers = num_layers
+        self.unroll_layers = unroll_layers
+        one_block_statedict = self.m.state_dict()
+        self.layer_weights_keys = list(one_block_statedict.keys())
+        stacked_weights = self._stack_layer_weights(one_block_statedict, num_layers)
+        # register those as parameters on this module
+
+        self.params = nn.ParameterDict(
+            {self._param_name_new(k): nn.Parameter(v) for k, v in stacked_weights.items()}
+        )
+
+        #self._eval_one_layer = eval_one_layer
+
+    def _stack_layer_weights(self, orig_state_dict, num_layers):
+        # Create weights such that, for every [n, m] weights
+        # becomes [k, n, m] where k is number of layer
+        # i.e. stacking layer weights together
+        temp = {}
+        for k, v in orig_state_dict.items():
+            newv = torch.stack([v for _ in range(num_layers)])
+            temp[k] = newv
+        return temp
+
+
+    def _param_name_new(self, old):
+        return '___'.join(old.split('.'))
+
+    def _param_name_old(self, new):
+        return '.'.join(new.split('___'))
+
+    def forward(self, *args, **kwargs):
+        assert not kwargs
+        weights = {k: self.params[self._param_name_new(k)] for k in self.layer_weights_keys}
+        scan = interop.torch_view(jax.lax.scan)
+        rest = args[1:]
+
+        def eval_one_layer(h, weight):
+            # unpack args
+            def gather_and_call(h, new_weights):
+                gathered = {}
+                for k, val in new_weights.items():
+                    gathered[k] = all_gather(val, axis=_fsdp_axis(k), axis_name='fsdp', tiled=True)
+                newh = torch.func.functional_call(self.m, gathered, (h, *rest))
+                return newh
+            
+            for i in range(self.unroll_layers):
+                new_weights = {}
+                for k, v in weight.items():
+                    new_weights[k] = v[i]
+                h = gather_and_call(h, new_weights)
+            # next layer's input; and residual to be added to list
+            return h, torch.ones(1)
+
+
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=[
+                "decoder_layer_input",
+                "query_proj",
+                "key_proj",
+                "value_proj",
+                "out_proj",
+            ],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+        _eval_one_layer = interop.call_jax(
+            jax.checkpoint, 
+            eval_one_layer,
+            policy=policy,
+        )
+        reshaped_weights = {}
+        for k, v in weights.items():
+            shape = v.shape
+            reshaped_weights[k] = v.reshape(shape[0] // self.unroll_layers, self.unroll_layers, *shape[1:])
+        h, _ = scan(
+            _eval_one_layer,
+            args[0],
+            reshaped_weights,
+        )
+        return h
+
+
+
+
 
 class Transformer(nn.Module):
-    def __init__(self, params: ModelArgs):
+    def __init__(self, params: ModelArgs, unroll_layers):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
@@ -320,21 +451,22 @@ class Transformer(nn.Module):
             params.vocab_size, params.dim,
         )
 
-        self.layers = torch.nn.ModuleList()
-        for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+        # self.layers = torch.nn.ModuleList()
+        # for layer_id in range(params.n_layers):
+        #     self.layers.append(TransformerBlock(layer_id, params))
+        self.layers = ScanLayer(TransformerBlock(0, params), params.n_layers, unroll_layers=unroll_layers)
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(
             params.dim, params.vocab_size, bias=False,
         )
 
-
     def forward(self, tokens: torch.Tensor, start_pos: int, freqs_cis, mask):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+        h = all_gather(h, axis_name='tp', tiled=True, axis=2)
+        h = self.layers(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
         output = self.output(h)
+        output = all_gather(output, axis_name='tp', tiled=True, axis=2)
         return output

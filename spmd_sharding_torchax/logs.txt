@@ -1,0 +1,240 @@
+XPK Start: Sun Jan 26 04:41:11 UTC 2025
+/usr/local/lib/python3.10/site-packages/torch/distributed/distributed_c10d.py:335: UserWarning: Device capability of jax unspecified, assuming `cpu` and `cuda`. Please specify it via the `devices` argument of `register_backend`.
+  warnings.warn(
+I0126 04:41:13.258175      11 b295d63588a.cc:733] Linux version 6.6.56+ (builder@7fe0e7255922) (Chromium OS 17.0_pre498229-r33 clang version 17.0.0 (/var/cache/chromeos-cache/distfiles/egit-src/external/github.com/llvm/llvm-project 14f0776550b5a49e1c42f49a00213f7f3fa047bf), LLD 17.0.0) #1 SMP PREEMPT_DYNAMIC Sat Dec  7 10:56:51 UTC 2024
+I0126 04:41:13.258453      11 b295d63588a.cc:815] Process id 11
+I0126 04:41:13.258474      11 b295d63588a.cc:820] Current working directory /workdir
+I0126 04:41:13.258477      11 b295d63588a.cc:822] Current timezone is UTC (currently UTC +00:00)
+I0126 04:41:13.258480      11 b295d63588a.cc:826] Built on Jan 13 2025 15:47:16 (1736812036)
+I0126 04:41:13.258482      11 b295d63588a.cc:827]  at cloud-tpus-runtime-release-tool@vnmb11.prod.google.com:/google/src/cloud/buildrabbit-username/buildrabbit-client/g3     
+I0126 04:41:13.258484      11 b295d63588a.cc:828]  as //learning/45eac/tfrc/executor:_libtpu.so.native
+I0126 04:41:13.258485      11 b295d63588a.cc:829]  for gcc-4.X.Y-crosstool-v18-llvm-grtev4-k8.k8
+I0126 04:41:13.258487      11 b295d63588a.cc:832]  from changelist 715008383 with baseline 715008383 in a mint client based on __ar56t/g3     
+I0126 04:41:13.258489      11 b295d63588a.cc:836] Build label: libtpu_lts_20250113_c_RC00
+I0126 04:41:13.258491      11 b295d63588a.cc:838] Build tool: Bazel, release r4rca-2025.01.06-2 (mainline @712342264)
+I0126 04:41:13.258492      11 b295d63588a.cc:839] Build target: 
+I0126 04:41:13.258494      11 b295d63588a.cc:846] Command line arguments:
+I0126 04:41:13.258495      11 b295d63588a.cc:848] argv[0]: './tpu_driver'
+I0126 04:41:13.258499      11 b295d63588a.cc:848] argv[1]: '--minloglevel=0'
+I0126 04:41:13.258501      11 b295d63588a.cc:848] argv[2]: '--stderrthreshold=0'
+I0126 04:41:13.258503      11 b295d63588a.cc:848] argv[3]: '--v=0'
+I0126 04:41:13.258506      11 b295d63588a.cc:848] argv[4]: '--vmodule=real_program_continuator=1'
+I0126 04:41:13.258508      11 b295d63588a.cc:848] argv[5]: '--log_dir=/tmp/tpu_logs'
+I0126 04:41:13.258511      11 b295d63588a.cc:848] argv[6]: '--max_log_size=1024'
+I0126 04:41:13.258513      11 b295d63588a.cc:848] argv[7]: '--enforce_kernel_ipv6_support=0'
+I0126 04:41:13.258515      11 b295d63588a.cc:848] argv[8]: '--next_pluggable_device_use_c_api=0'
+I0126 04:41:13.258517      11 b295d63588a.cc:848] argv[9]: '--2a886c8_wrap=true,true,true'
+I0126 04:41:13.258519      11 b295d63588a.cc:848] argv[10]: '--2a886c8_chip_config_name=megachip_tccontrol'
+I0126 04:41:13.258522      11 b295d63588a.cc:848] argv[11]: '--2a886c8_twist=false'
+I0126 04:41:13.258524      11 b295d63588a.cc:848] argv[12]: '--2a886c8_chips_per_host_bounds=2,2,1'
+I0126 04:41:13.258526      11 b295d63588a.cc:848] argv[13]: '--2a886c8_host_bounds=2,4,8'
+I0126 04:41:13.258528      11 b295d63588a.cc:848] argv[14]: '--2a886c8_slice_builder_worker_port=8471'
+I0126 04:41:13.258530      11 b295d63588a.cc:848] argv[15]: '--2a886c8_slice_builder_worker_addresses=hanq-v5p-512-20250126-044057-slice-job-0-0.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-1.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-2.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-3.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-4.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-5.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-6.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-7.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-8.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-9.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-10.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-11.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-12.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-13.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-14.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-15.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-16.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-17.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-18.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-19.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-20.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-21.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-22.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-23.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-24.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-25.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-26.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-27.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-28.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-29.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-30.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-31.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-32.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-33.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-34.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-35.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-36.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-37.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-38.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-39.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-40.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-41.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-42.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-43.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-44.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-45.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-46.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-47.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-48.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-49.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-50.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-51.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-52.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-53.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-54.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-55.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-56.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-57.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-58.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-59.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-60.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-61.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-62.hanq-v5p-512-20250126-044057:8471,hanq-v5p-512-20250126-044057-slice-job-0-63.hanq-v5p-512-20250126-044057:8471'
+I0126 04:41:13.258550      11 b295d63588a.cc:848] argv[16]: '--tpu_slice_builder_dump_chip=true'
+I0126 04:41:13.258552      11 b295d63588a.cc:848] argv[17]: '--tpu_slice_builder_dump_chip_force=false'
+I0126 04:41:13.258559      11 b295d63588a.cc:848] argv[18]: '--tpu_slice_builder_dump_to_localhost=1'
+I0126 04:41:13.258561      11 b295d63588a.cc:848] argv[19]: '--2a886c8_ici_resilient=true'
+I0126 04:41:13.258562      11 b295d63588a.cc:848] argv[20]: '--xla_tpu_use_resilient_collective_emitter=false'
+I0126 04:41:13.258564      11 b295d63588a.cc:848] argv[21]: '--tpu_slice_builder_topology_discovery_fault_injection='
+I0126 04:41:13.258569      11 b295d63588a.cc:848] argv[22]: '--runtime_metric_service_port=8431'
+I0126 04:41:13.258571      11 b295d63588a.cc:848] argv[23]: '--tpu_hbm_report_enable=1'
+I0126 04:41:13.258573      11 b295d63588a.cc:848] argv[24]: '--tpu_hbm_report_frequency=5s'
+I0126 04:41:13.258574      11 b295d63588a.cc:848] argv[25]: '--megascale_coordinator_address=hanq-v5p-512-20250126-044057-slice-job-0-0.hanq-v5p-512-20250126-044057:8080'
+I0126 04:41:13.258577      11 b295d63588a.cc:848] argv[26]: '--megascale_slice_id=0'
+I0126 04:41:13.258579      11 b295d63588a.cc:848] argv[27]: '--megascale_num_slices=1'
+I0126 04:41:13.258581      11 b295d63588a.cc:848] argv[28]: '--megascale_transport_type=grpc'
+I0126 04:41:13.258583      11 b295d63588a.cc:848] argv[29]: '--megascale_port=8080'
+I0126 04:41:13.258585      11 b295d63588a.cc:848] argv[30]: '--megascale_use_insecure_grpc'
+I0126 04:41:13.258587      11 b295d63588a.cc:848] argv[31]: '--eventmanager2_as_default_eventmanager'
+I0126 04:41:13.258589      11 b295d63588a.cc:848] argv[32]: '--eventmanager2_default_autosizer=mean_latency'
+I0126 04:41:13.258591      11 b295d63588a.cc:848] argv[33]: '--megascale_grpc_enable_xor_tracer=true'
+I0126 04:41:13.258593      11 b295d63588a.cc:848] argv[34]: '--xor_trace_sampling_period=100'
+I0126 04:41:13.258595      11 b295d63588a.cc:848] argv[35]: '--rpc_transport_metrics_period=20'
+I0126 04:41:13.258598      11 b295d63588a.cc:848] argv[36]: '--grpc_experiments=event_engine_client,event_engine_listener'
+I0126 04:41:13.258600      11 b295d63588a.cc:848] argv[37]: '--enable_runtime_uptime_telemetry=true'
+I0126 04:41:13.258602      11 b295d63588a.cc:848] argv[38]: ''
+I0126 04:41:13.258604      11 b295d63588a.cc:848] argv[39]: '--xla_tpu_use_enhanced_launch_barrier=true'
+I0126 04:41:13.258847      11 init.cc:78] Remote crash gathering hook installed.
+I0126 04:41:13.258882      11 tpu_runtime_type_flags.cc:91] --tpu_use_tfrt not specified. Using default value: true
+I0126 04:41:13.264962      11 tf_tpu_flags.cc:60] 2a886c8Platform is NOT registered.
+I0126 04:41:13.265217      11 logger.cc:310] Enabling threaded logging for severity WARNING
+I0126 04:41:13.265336      11 mlock.cc:219] mlock()-ed 4096 bytes for BuildID, using 1 syscalls.
+I0126 04:41:13.265386      11 gce_instance_metadata_snapshot.cc:31] Skipping MDS query due to true
+W0126 04:41:13.265673      11 uptime_telemetry.cc:186] UptimeMetric attributes are updated.
+Previous Attributes: go/nodeserialize    
+key: "uptime_attributes"
+value {
+  kvlist_attr {
+    attributes {
+      key: "ml_framework_name"
+      value {
+        string_attr: "jax"
+      }
+    }
+    attributes {
+      key: "ml_framework_version"
+      value {
+        string_attr: "jax-0.5.0"
+      }
+    }
+  }
+}
+
+New Attributes: go/nodeserialize    
+key: "uptime_attributes"
+value {
+  kvlist_attr {
+    attributes {
+      key: "ml_framework_name"
+      value {
+        string_attr: "pytorch/xla2"
+      }
+    }
+    attributes {
+      key: "ml_framework_version"
+      value {
+        string_attr: "pytorch/xla2-v0.0.1"
+      }
+    }
+  }
+}
+I0126 04:41:13.283527      11 singleton_tpu_states_manager.cc:72] TPU premapped buffer enabled. Size: 4294967296 Threshold: 4294967296
+I0126 04:41:13.283557      11 singleton_tpu_states_manager.cc:95] TpuStatesManager::GetOrCreate(): no tpu system exists. Creating a new tpu system.
+I0126 04:41:13.284794      11 device_util.cc:124] Found 4 TPU v5 chips.
+I0126 04:41:13.284815      11 tpu_version_flag.cc:53] Using auto-detected TPU version TPU v5
+I0126 04:41:13.285572      11 device_util.cc:124] Found 4 TPU v5 chips.
+I0126 04:41:13.286340      11 device_util.cc:124] Found 4 TPU v5 chips.
+I0126 04:41:13.298142     328 device_util.cc:124] Found 4 TPU v5 chips.
+I0126 04:41:13.298174     328 flags_util.cc:312] Using 8471 from --2a886c8_slice_builder_worker_port as SliceBuilder worker service port.
+I0126 04:41:13.298951     328 device_util.cc:124] Found 4 TPU v5 chips.
+I0126 04:41:13.298968     328 tpu_network_factory.cc:56] tpunetd not supported, falling back to Slice Builder
+I0126 04:41:13.305815     328 init-domain.cc:126] Fiber init: default domain = futex, concurrency = 228, prefix = futex-default
+I0126 04:41:14.321875     332 async_driver.cc:428] [/dev/vfio/1 tpu373:pe0:1] Driver opened.
+I0126 04:41:14.357854     333 async_driver.cc:428] [/dev/vfio/2 tpu373:pe0:2] Driver opened.
+I0126 04:41:14.364417     334 async_driver.cc:428] [/dev/vfio/3 tpu373:pe0:3] Driver opened.
+I0126 04:41:14.370521     331 async_driver.cc:428] [/dev/vfio/0 tpu373:pe0:0] Driver opened.
+W0126 04:41:14.475873     332 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 0}
+W0126 04:41:14.489673     332 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 1}
+W0126 04:41:14.490036     331 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 0}
+W0126 04:41:14.490595     334 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 0}
+W0126 04:41:14.490674     333 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 0}
+W0126 04:41:14.492679     332 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 2}
+W0126 04:41:14.492900     331 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 1}
+W0126 04:41:14.493487     334 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 1}
+W0126 04:41:14.493580     333 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 1}
+W0126 04:41:14.495739     331 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 2}
+W0126 04:41:14.495884     332 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 3}
+W0126 04:41:14.496148     334 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 2}
+W0126 04:41:14.496335     333 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 2}
+W0126 04:41:14.498429     331 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 3}
+W0126 04:41:14.498548     334 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 3}
+W0126 04:41:14.498765     333 tpu_vxc_driver.cc:658] Skipping initialization of PA bits on {type = SparseCore, index = 3}
+I0126 04:41:14.498851     328 slice_builder_helper.cc:98] Current host is used as SliceBuilder master.
+I0126 04:41:14.499439     328 config.cc:265] gRPC experiments: event_engine_client:on, event_engine_listener:on; default-enabled: max_pings_wo_data_throttle, monitoring_experiment, pick_first_new, time_caching_in_party, trace_record_callops, work_serializer_dispatch
+I0126 04:41:14.500764     415 futex.cc:61] RAW: Futex::Swap(): using GFUTEX_SWAP
+I0126 04:41:14.506634     627 hostname.cc:43] Note: we could not read a GMI proto at '/etc/googlemachineidentity/live/machine_identity.pb'. If this is a prod machine, it is probably broken. If it is a non-prod machine (corp, cloudtop etc), this is ok.
+I0126 04:41:17.666508     328 master.cc:221] Successfully initialized SliceBuilder master session 68ec93950b662c1c with expected topology (4W, 8W, 8W)
+I0126 04:41:17.667674     328 tpu_hal.cc:198] Starting premapped memory manager initialization...
+I0126 04:41:22.673103     328 runtime_metric_service.cc:122] Successfully started Runtime Metric Service on port: 8431
+I0126 04:41:22.673206     328 system.cc:1053] tpu::System initialized, current host id: 48, logical device ids: 192,193,196,197
+I0126 04:41:22.673268      11 tfrt_tpu_system_state.cc:213] CreateTpuSystemState: TPU initialization is successful and it took 9.376264147s
+I0126 04:41:22.673308      11 tfrt_tpu_system_state.cc:217] CreateTpuSystemState: using TPU host premapped buffer of size: 4294967296
+I0126 04:41:22.673327      11 tpu_host_allocator.cc:39] Premapped buffer is using alignment 64
+I0126 04:41:22.674164      11 allocator_stats_reporter.cc:117] Starting AllocatorStats Reporter with reporting interval: 5s
+2025-01-26 04:41:22.674804: I external/xla/xla/pjrt/pjrt_c_api_client.cc:130] PjRtCApiClient created.
+running SPMD with num_devices: 256 mesh: (128, 2)
+Traceback (most recent call last):
+  File "/workdir/ffn_2_layer.py", line 202, in <module>
+    fire.Fire(main)
+  File "/usr/local/lib/python3.10/site-packages/fire/core.py", line 135, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/site-packages/fire/core.py", line 468, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/site-packages/fire/core.py", line 684, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/workdir/ffn_2_layer.py", line 140, in main
+    model = Model().to('jax')
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1340, in to
+    return self._apply(convert)
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 927, in _apply
+    param_applied = fn(param)
+  File "/usr/local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1326, in convert
+    return t.to(
+  File "/xla/torchax/torchax/tensor.py", line 216, in __torch_function__
+    return self.env.dispatch(func, types, args, kwargs)
+  File "/xla/torchax/torchax/tensor.py", line 405, in dispatch
+    return self._torch_Tensor_to(args, kwargs)
+  File "/xla/torchax/torchax/tensor.py", line 396, in _torch_Tensor_to
+    return self._to_copy(the_tensor, dtype, device)
+  File "/xla/torchax/torchax/tensor.py", line 349, in _to_copy
+    arr = jax.device_put(arr, jax_device)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/api.py", line 2301, in device_put
+    out_flat = dispatch.device_put_p.bind(
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/core.py", line 463, in bind
+    return self.bind_with_trace(prev_trace, args, params)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/core.py", line 468, in bind_with_trace
+    return trace.process_primitive(self, args, params)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/core.py", line 954, in process_primitive
+    return primitive.impl(*args, **params)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/dispatch.py", line 497, in _batched_device_put_impl
+    y = _device_put_impl(x, device=device, src=src, copy=cp)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/dispatch.py", line 486, in _device_put_impl
+    return _device_put_sharding_impl(x, aval, device, copy)
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/dispatch.py", line 442, in _device_put_sharding_impl
+    return pxla.batched_device_put(aval, SingleDeviceSharding(device), [x],
+  File "/usr/local/lib/python3.10/site-packages/jax/_src/interpreters/pxla.py", line 244, in batched_device_put
+    return xc.batched_device_put(aval, sharding, xs, list(devices), committed)
+jaxlib.xla_extension.XlaRuntimeError: INVALID_ARGUMENT: Cannot copy array to non-addressable device TPU_0(process=0,(0,0,0,0))
+I0126 04:41:58.555601      11 allocator_stats_reporter.cc:147] Stopping AllocatorStatsReporter. Reporting one last time first.
+I0126 04:41:58.928179    1549 real_program_continuator.cc:802] 0x1x6_TC1: Enqueueing termination descriptor.
+I0126 04:41:58.928853     523 real_program_continuator.cc:1375] 0x1x6_TC1: Halted.
+I0126 04:41:58.929548    1549 real_program_continuator.cc:826] 0x1x6_TC1: Termination descriptor enqueued.
+I0126 04:41:58.929864     523 real_program_continuator.cc:1379] 0x1x6_TC1: Halt is expected.
+I0126 04:41:58.995982    1550 real_program_continuator.cc:802] 1x1x6_TC1: Enqueueing termination descriptor.
+I0126 04:41:58.996752     529 real_program_continuator.cc:1375] 1x1x6_TC1: Halted.
+I0126 04:41:58.999397    1550 real_program_continuator.cc:826] 1x1x6_TC1: Termination descriptor enqueued.
+I0126 04:41:58.999667     529 real_program_continuator.cc:1379] 1x1x6_TC1: Halt is expected.
+I0126 04:41:59.108081    1549 real_program_continuator.cc:802] 0x1x6_TC0: Enqueueing termination descriptor.
+I0126 04:41:59.118607     430 real_program_continuator.cc:1375] 0x1x6_TC0: Halted.
+I0126 04:41:59.118839    1547 real_program_continuator.cc:802] 0x0x6_TC0: Enqueueing termination descriptor.
+I0126 04:41:59.119090    1549 real_program_continuator.cc:826] 0x1x6_TC0: Termination descriptor enqueued.
+I0126 04:41:59.119175     430 real_program_continuator.cc:1379] 0x1x6_TC0: Halt is expected.
+I0126 04:41:59.119166     518 real_program_continuator.cc:1375] 0x0x6_TC0: Halted.
+I0126 04:41:59.132930    1547 real_program_continuator.cc:826] 0x0x6_TC0: Termination descriptor enqueued.
+I0126 04:41:59.133315     518 real_program_continuator.cc:1379] 0x0x6_TC0: Halt is expected.
+I0126 04:41:59.135891    1550 real_program_continuator.cc:802] 1x1x6_TC0: Enqueueing termination descriptor.
+I0126 04:41:59.147072     508 real_program_continuator.cc:1375] 1x1x6_TC0: Halted.
+I0126 04:41:59.148623    1550 real_program_continuator.cc:826] 1x1x6_TC0: Termination descriptor enqueued.
+I0126 04:41:59.148867     508 real_program_continuator.cc:1379] 1x1x6_TC0: Halt is expected.
+I0126 04:41:59.301290    1547 real_program_continuator.cc:802] 0x0x6_TC1: Enqueueing termination descriptor.
+I0126 04:41:59.302055     528 real_program_continuator.cc:1375] 0x0x6_TC1: Halted.
+I0126 04:41:59.304381    1547 real_program_continuator.cc:826] 0x0x6_TC1: Termination descriptor enqueued.
+I0126 04:41:59.304620     528 real_program_continuator.cc:1379] 0x0x6_TC1: Halt is expected.
+I0126 04:41:59.348850    1548 real_program_continuator.cc:802] 1x0x6_TC0: Enqueueing termination descriptor.
+I0126 04:41:59.350160     513 real_program_continuator.cc:1375] 1x0x6_TC0: Halted.
+I0126 04:41:59.351435    1548 real_program_continuator.cc:826] 1x0x6_TC0: Termination descriptor enqueued.
+I0126 04:41:59.351687     513 real_program_continuator.cc:1379] 1x0x6_TC0: Halt is expected.
+I0126 04:41:59.500877    1548 real_program_continuator.cc:802] 1x0x6_TC1: Enqueueing termination descriptor.
+I0126 04:41:59.501720     538 real_program_continuator.cc:1375] 1x0x6_TC1: Halted.
+I0126 04:41:59.502373    1548 real_program_continuator.cc:826] 1x0x6_TC1: Termination descriptor enqueued.
+I0126 04:41:59.502597     538 real_program_continuator.cc:1379] 1x0x6_TC1: Halt is expected.
+W0126 04:42:01.700542    1435 firmware_indirect_registers.cc:80] Released last reference with existing Open. Performing implicit close-on-destruction.
+W0126 04:42:02.164371    1450 firmware_indirect_registers.cc:80] Released last reference with existing Open. Performing implicit close-on-destruction.
+W0126 04:42:02.663903    1454 firmware_indirect_registers.cc:80] Released last reference with existing Open. Performing implicit close-on-destruction.
+W0126 04:42:02.687654     985 firmware_indirect_registers.cc:80] Released last reference with existing Open. Performing implicit close-on-destruction.
+I0126 04:42:03.012408    1435 async_driver.cc:960] [/dev/vfio/2 tpu373:pe0:2] Driver closed.
+I0126 04:42:03.523390    1450 async_driver.cc:960] [/dev/vfio/0 tpu373:pe0:0] Driver closed.
+I0126 04:42:03.581556    1454 async_driver.cc:960] [/dev/vfio/1 tpu373:pe0:1] Driver closed.
+I0126 04:42:03.793379     985 async_driver.cc:960] [/dev/vfio/3 tpu373:pe0:3] Driver closed.
+  
+
+ERROR: (gcloud.storage.cp) The following URLs matched no objects or files:
+/tmp/pytorch_profile
+XPK End: Sun Jan 26 04:42:06 UTC 2025
+EXIT_CODE=1

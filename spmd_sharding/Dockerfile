@@ -20,23 +20,20 @@ RUN apt-get update && apt-get install -y google-cloud-sdk git fuse gcsfuse && gc
 # Set the default Python version to 3.10
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 1
 
+RUN pip install fire
+RUN pip install torch~=2.5.0 'torch_xla[tpu]~=2.5.0' \
+  -f https://storage.googleapis.com/libtpu-releases/index.html \
+  -f https://storage.googleapis.com/libtpu-wheels/index.html
 
-RUN git clone https://github.com/pytorch/xla.git
-WORKDIR xla/experimental/torch_xla2
-RUN git checkout hanq_hybrid_mesh
-RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-RUN pip install optax fire tensorflow tensorboard-plugin-profile
-RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
-RUN pip install -e .[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
-
-RUN mkdir /llama
-WORKDIR /llama
+RUN mkdir /workdir
+WORKDIR /workdir
 COPY ./*.py ./
-ENV LIBTPU_INIT_ARGS "--xla_tpu_scoped_vmem_limit_kib=98304 --xla_enable_async_all_gather=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
+COPY ./entrypoint.sh ./
+#ENV LIBTPU_INIT_ARGS "--xla_tpu_scoped_vmem_limit_kib=98304 --xla_enable_async_all_gather=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true"
 # ENV LIBTPU_INIT_ARGS "--xla_tpu_enable_flash_attention=false --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true --xla_tpu_scoped_vmem_limit_kib=81920"
 # ENV LIBTPU_INIT_ARGS "--xla_tpu_enable_flash_attention=false  --xla_tpu_enable_async_collective_fusion=true  --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true  --xla_tpu_enable_async_collective_fusion_multiple_steps=true  --xla_tpu_overlap_compute_collective_tc=true  --xla_enable_async_all_gather=true  --xla_tpu_scoped_vmem_limit_kib=98304  --xla_latency_hiding_scheduler_rerun=1  --xla_tpu_prefer_async_allgather_to_allreduce=true"
-ENTRYPOINT ["python", "run.py"]
-CMD ["--batch_size=128", "--model_type=405B", "--seqlen=8192", "--use_custom_offload=True", "--use_custom_mesh=True", "--model_impl=scan", "--tp=4", "--unroll_layers=1", "--profile_dir=/tmp/llama3hanq"]
+# ENV XLA_DISABLE_FUNCTIONALIZATION "1"
+ENTRYPOINT ["bash", "entrypoint.sh"]
 
 
 

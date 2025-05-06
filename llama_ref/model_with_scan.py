@@ -19,9 +19,12 @@ import torch.nn.functional as F
 from torch import nn
 from dataclasses import dataclass
 import jax
+from jax.sharding import PartitionSpec as P
 from torch_xla2 import interop
 
 from jax.ad_checkpoint import checkpoint_name
+
+with_sharding_constraint = interop.torch_view(jax.lax.with_sharding_constraint)
 
 @dataclass
 class ModelArgs:
@@ -168,7 +171,7 @@ def apply_rotary_emb(
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    return xq_out.to(torch.bfloat16), xk_out.to(torch.bfloat16)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -227,7 +230,11 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq = with_sharding_constraint(xq, P('fsdp', None, 'tp', None))
+        xk = with_sharding_constraint(xk, P('fsdp', None, 'tp', None))
+        xv = with_sharding_constraint(xv, P('fsdp', None, 'tp', None))
+
+        #xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         xq = interop.call_jax(checkpoint_name, xq, 'query_proj')
         xk = interop.call_jax(checkpoint_name, xk, 'key_proj')
@@ -255,7 +262,10 @@ class Attention(nn.Module):
         )
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(output)
+        out = self.wo(output)
+        out = with_sharding_constraint(out, P('fsdp', None, None))
+        out = interop.call_jax(checkpoint_name, out, 'out_proj')
+        return out
 
 
 class FeedForward(nn.Module):
@@ -317,7 +327,7 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
-        x = interop.call_jax(checkpoint_name, x, 'decode_layer_input')
+        x = interop.call_jax(checkpoint_name, x, 'decoder_layer_input')
         h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
@@ -339,18 +349,6 @@ class ScanLayer(nn.Module):
             {self._param_name_new(k): nn.Parameter(v) for k, v in stacked_weights.items()}
         )
 
-        @functools.partial(
-            interop.jax_jit,
-            kwargs_for_jax_jit={'donate_argnums': (0,)}
-        )
-        def eval_one_layer(args, weight):
-            # unpack args
-            h, *rest = args
-            newh = torch.func.functional_call(self.m, weight, args)
-            # next layer's input; and residual to be added to list
-            return (newh, *rest), torch.ones(1)
-
-        self._eval_one_layer = eval_one_layer
 
     def _stack_layer_weights(self, orig_state_dict, num_layers):
         # Create weights such that, for every [n, m] weights
@@ -373,8 +371,33 @@ class ScanLayer(nn.Module):
         assert not kwargs
         weights = {k: self.params[self._param_name_new(k)] for k in self.layer_weights_keys}
         scan = interop.torch_view(jax.lax.scan)
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=[
+                "decoder_layer_input",
+                "query_proj",
+                "key_proj",
+                "value_proj",
+                "out_proj",
+            ],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+
+        def eval_one_layer(args, weight):
+            # unpack args
+            h, *rest = args
+            newh = torch.func.functional_call(self.m, weight, args)
+            # next layer's input; and residual to be added to list
+            return (newh, *rest), torch.ones(1)
+
+        _eval_one_layer = interop.call_jax(
+            jax.checkpoint, 
+            eval_one_layer,
+            policy=policy,
+        )
         h, _ = scan(
-            self._eval_one_layer,
+            _eval_one_layer,
             args,
             weights,
         )
