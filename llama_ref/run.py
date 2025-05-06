@@ -79,7 +79,7 @@ def create_sharded_weights(model, mesh, sharding_map):
               weight_meta.shape,
               dtype=weight_meta.dtype)
             weight_jax = torch_xla2.default_env().to_xla(weight_torch).jax()
-        #print(name, weight.shape, weight.dtype)
+        print(name, weight.shape, weight.dtype)
         res[name] = jax.make_array_from_callback(
           weight_jax.shape, sharding, lambda a: weight_jax[a]
         )

@@ -29,10 +29,16 @@ sudo docker push gcr.io/tpu-pytorch/llama3:latest
 ```
 
 ```
-gcloud compute tpus tpu-vm ssh --zone "us-central2-b" "ray-hanq-ray-cluster-worker-b3686b6a-tpu" --project "tpu-pytorch" --worker=all --command="sudo docker run --net=host --pull=always --privileged gcr.io/tpu-pytorch/llama3:latest"
+
+gcloud compute tpus tpu-vm ssh --zone "us-central2-b" "ray-hanq-ray-cluster-worker-9914cfff-tpu" --project "tpu-pytorch" --worker=all --command="python -c 'import jax; print(jax.devices())'"
 ```
 
 ## Run docker
 ```
 sudo docker run --net=host --privileged -it torchxla2
 ```
+
+
+## xprof
+8B, 2k cont length; 32xv4
+https://xprof.corp.google.com/trace_viewer/hanq-12063596051371474787?hosts=t1v-n-df786e86-w-0&host_index=0&view_start=1380.712&view_end=2433.584
