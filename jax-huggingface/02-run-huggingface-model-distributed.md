@@ -158,3 +158,5 @@ python jax_hg_02.py
 ## Conclusion
 
 We've successfully demonstrated how to run a Llama model's forward pass in a **distributed fashion** without altering the model's core code. The key was simply specifying how the weights should be sharded. We also showed how standard JAX profiling tools can confirm the distributed execution and help in performance analysis.
+
+For the next post, we will do the same with a model from HuggingFace diffusers library.
