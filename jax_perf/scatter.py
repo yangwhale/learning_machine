@@ -90,9 +90,9 @@ def run_and_measure(f, arr):
 # Goal:
 # 4096 x 4096 on CPU -> to sharded 512 x 4096 on 8 chips
 
-SIZE = 4096
+SIZE = 4096 * 4
 
-source = np.ones((4096, 4096))
+source = np.ones((SIZE, SIZE))
 
 run_and_measure(scatter0, source)
 run_and_measure(scatter1, source)
