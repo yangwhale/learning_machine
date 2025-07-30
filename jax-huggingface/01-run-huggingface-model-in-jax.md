@@ -18,13 +18,14 @@ We'll begin with the standard Hugging Face quickstart setup. If you haven't alre
 # Create venv / conda env; activate etc.
 pip install huggingface-cli
 huggingface-cli login # Set up your Hugging Face token
-pip install -U transformers datasets evaluate accelerate timm
+pip install -U transformers datasets evaluate accelerate timm flax
 ```
 
 Next, install `torchax` directly from its latest development version:
 
 ```bash
 pip install torchax
+pip install jax[tpu] # or jax[cuda12] if you are on GPU https://docs.jax.dev/en/latest/installation.html
 ```
 
 -----
