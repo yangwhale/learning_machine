@@ -1,6 +1,6 @@
 # How to Run a Hugging Face Model in JAX (Part 2)
 
-In the [previous post](https://www.google.com/search?q=jax-huggingface/01-run-huggingface-model-in-jax.md), we explored how to perform a **forward pass** for a Llama model using Hugging Face and JAX. This time, we'll achieve the same goal, but by utilizing **eight devices** simultaneously.
+In the [previous post](jax-huggingface/01-run-huggingface-model-in-jax.md), we explored how to perform a **forward pass** for a Llama model using Hugging Face and JAX. This time, we'll achieve the same goal, but by utilizing **eight devices** simultaneously.
 
 -----
 
