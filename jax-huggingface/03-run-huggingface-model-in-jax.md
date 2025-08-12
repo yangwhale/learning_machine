@@ -1,7 +1,7 @@
 # How to Run a Hugging Face Model in JAX (Part 3)
 
-In the previous posts, [part 1](jax-huggingface/0]1-run-huggingface-model-in-jax.md) and
-[part 2](jax-huggingface/02-run-huggingface-model-in-jax.md), we explored how to 
+In the previous posts, [part 1](01-run-huggingface-model-in-jax.md) and
+[part 2](02-run-huggingface-model-in-jax.md), we explored how to 
 call the `forward` function of a HuggingFace model. Now let's see
 how we can run it's autoregressive decoding function. But before that, let's first
 dive into how `torchax` works.
@@ -465,4 +465,4 @@ Running it again we got:
 Time:  14.7717966591008
 ```
 
-Much much faster! The full repro is located at [jax_hg_03.py](jax-huggingface/jax_hg_03.py).
+Much much faster! The full repro is located at [jax_hg_03.py](jax_hg_03.py).
