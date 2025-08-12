@@ -395,7 +395,7 @@ TypeError: Error interpreting argument to functools.partial(<function call_torch
 This typically means that a jit-wrapped function was called with a non-array argument, and this argument was not marked as static using the static_argnums or static_argnames parameters of jax.jit.
 ```
 
-Recall [episode 1](jax-huggingface/01-run-huggingface-model-in-jax.md) we encountered exactly the same issue, namely, StaticCache need to be registered in pytree.
+Recall [episode 1](01-run-huggingface-model-in-jax.md) we encountered exactly the same issue, namely, StaticCache need to be registered in pytree.
 
 To do that, we add the following:
 
