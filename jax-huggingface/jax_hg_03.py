@@ -51,6 +51,24 @@ register_pytree_node(
   _unflatten_dynamic_cache,
 )
 
+def _flatten_static_cache(cache):
+  return (
+      cache.key_cache,
+      cache.value_cache,
+  ), (cache._config, cache.max_batch_size, cache.max_cache_len)
+
+def _unflatten_static_cache(aux, children):
+  cache = cache_utils.StaticCache(*aux)
+  cache._config = aux[0]
+  cache.key_cache, cache.value_cache = children
+  return cache
+
+register_pytree_node(
+  cache_utils.StaticCache,
+  _flatten_static_cache,
+  _unflatten_static_cache,
+)
+
 model = AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-2-7b-hf", 
         torch_dtype="bfloat16", device_map="cpu")
@@ -115,7 +133,7 @@ def run_twice_and_print_cache_static(model, input_ids):
     break
 
 
-def autoregressive_decode(model, input_ids, tokenizer, max_tokens=50):
+def autoregressive_decode(model, input_ids, tokenizer, max_tokens=50, use_static_cache=False):
   start = time.perf_counter()
   res = model(input_ids)
 
@@ -134,42 +152,89 @@ def autoregressive_decode(model, input_ids, tokenizer, max_tokens=50):
   print(f'took {end - start} seconds')
   return result_tokens
 
+# https://huggingface.co/docs/transformers/v4.44.0/en/llm_optims?static-kv=advanced+usage%3A+control+Static+Cache#static-kv-cache-and-torchcompile
+def autoregressive_decode_static(model, input_ids, tokenizer, max_tokens=50):
+
+  def decode_one_tokens(model_weights, cur_token, input_pos, cache_position, past_key_values):
+    logits, cache = torch.func.functional_call(
+        model, 
+        model_weights, # weight state_dict
+        (cur_token,), # args as tuple
+        dict(
+          position_ids=input_pos,
+          cache_position=cache_position,
+          past_key_values=past_key_values,
+          return_dict=False,
+          use_cache=True) # kwargs as dict
+    )
+    new_token = torch.argmax(logits[:, -1], dim=-1)[:, None]
+    return new_token, cache
+
+  jitted = tx.interop.jax_jit(decode_one_tokens)
+  #jitted = decode_one_tokens
+
+  batch_size, seq_length = input_ids.shape
+  model_weights = model.state_dict()
+  with torch.no_grad():
+    start = time.perf_counter()
+    past_key_values = StaticCache(
+        config=model.config, 
+        max_batch_size=1, max_cache_len=max_tokens, 
+        device='jax', dtype=model.dtype
+    )
+    past_key_values._config = model.config # keep this
+    cache_position = torch.arange(seq_length, device='jax')
+    generated_ids = []
+
+    logits, past_key_values = model(
+        input_ids, 
+        cache_position=cache_position, 
+        past_key_values=past_key_values, 
+        return_dict=False, 
+        use_cache=True
+    )
+    next_token = torch.argmax(logits[:, -1], dim=-1)[:, None]
+    generated_ids.append(next_token[:, 0].item())
+
+    for k in past_key_values.key_cache:
+      k.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, 'axis', None, None))) # shard on num of head
+    for k in past_key_values.value_cache:
+      k.apply_jax_(jax.device_put, NamedSharding(mesh, P(None, 'axis', None, None))) # shard on num of head
+
+
+    cache_position = torch.tensor([seq_length + 1], device='jax')
+    
+    for i in range(1, max_tokens):
+        iter_time = time.perf_counter()
+        next_token, past_key_values = jitted(
+          model_weights,
+          next_token.clone(), None, cache_position, past_key_values)
+        generated_ids.append(next_token.int().item())
+        cache_position += 1
+        #print('Iteration', i, ' took ', time.perf_counter() - iter_time)
+    end = time.perf_counter()
+
+  text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+  print(text)
+  print('Time: ', end - start)
+
+
 # move the model's weight to 'jax' device. i.e. a tensor with a 
 # jax array inside
 with env:
   model.to('jax')
   weights = shard_weights_llama(mesh, model.state_dict())
+  # put the weights back into the model
+  model.load_state_dict(weights, assign=True, strict=False)
   input_ids = model_inputs.input_ids.to('jax').apply_jax_(
     jax.device_put,
     NamedSharding(mesh, P()))
   tx.interop.call_jax(jax.block_until_ready, weights)
 
-  run_twice_and_print_cache(model, input_ids)
+  #run_twice_and_print_cache(model, input_ids)
   #run_twice_and_print_cache_static(model, input_ids)
 
-  autoregressive_decode(model, input_ids, tokenizer)
+  autoregressive_decode_static(model, input_ids, tokenizer)
 
 
 sys.exit(0)
-with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=False):
-  for i in range(3):
-    start = time.time()
-    jax.block_until_ready(res)
-    end = time.time()
-    print(i, end - start, 'seconds')
- 
-# env = torchax.default_env()
-
-# with env:
-#   model.to('jax')
-#   # ??
-#   model.model.rotary_emb.original_inv_freq = model.model.rotary_emb.original_inv_freq.to('jax')
-#   jmodel = torchax.interop.JittableModule(model)
-
-#   model_inputs = dict(model_inputs)
-#   generated_ids = jmodel.generate(**torch_view(model_inputs))
-                                          
-
-# print(generated_ids)
-# print(tokenizer.batch_decode(generated_ids.cpu())[0])
-

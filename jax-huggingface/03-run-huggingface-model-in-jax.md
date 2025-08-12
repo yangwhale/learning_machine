@@ -6,6 +6,15 @@ call the `forward` function of a HuggingFace model. Now let's see
 how we can run it's autoregressive decoding function. But before that, let's first
 dive into how `torchax` works.
 
+Before you begin, if we installed `torchax` by following previous examples, 
+please reinstall from github via
+
+```bash
+pip install git+https://github.com/pytorch/xla.git#subdirectory=torchax
+```
+
+because there are some recent bugfixed (found while writing this post).
+
 -----
 
 
@@ -98,6 +107,12 @@ with env:
   print(torch.matmul(tensor, tensor))
   print(torch.sin(tensor))
   print(torch.exp(tensor))
+```
+
+You can repro the above example by running
+
+```bash
+python torchax-demo.py
 ```
 
 **A ML model is a graph composed with torch operators.  Therefore,
@@ -280,3 +295,174 @@ The issue with `jax.jit` and the `DynamicCache` used above is that
 the input and output shape changes in every iteration. Applying 
 `jax.jit` blindly will make it even slower than eager mode: it will need
 recompile a graph to run once, then discarded.
+
+Luckily, HuggingFace has a setting to use `StaticCache`, a cache 
+with fixed maximal length so we can avoid recompilation. According to the
+[LLM inference optimization](https://huggingface.co/docs/transformers/v4.44.0/en/llm_optims?static-kv=advanced+usage%3A+control+Static+Cache#static-kv-cache-and-torchcompile) doc, StaticCache is
+precisely introduced to support `torch.compile`; which also loves static shape.
+
+We write the following function to test out:
+Note that the python code seems more involved by it is copied from 
+[LLM inference optimization](https://huggingface.co/docs/transformers/v4.44.0/en/llm_optims?static-kv=advanced+usage%3A+control+Static+Cache#static-kv-cache-and-torchcompile) doc by HuggingFace.
+
+```python
+def autoregressive_decode_static(model, input_ids, tokenizer, max_tokens=50):
+
+  def decode_one_tokens(cur_token, input_pos, cache_position, past_key_values):
+    logits, cache = model(
+        cur_token,
+        position_ids=input_pos,
+        cache_position=cache_position,
+        past_key_values=past_key_values,
+        return_dict=False,
+        use_cache=True
+    )
+    new_token = torch.argmax(logits[:, -1], dim=-1)[:, None]
+    return new_token, cache
+
+  batch_size, seq_length = input_ids.shape
+  with torch.no_grad():
+    start = time.perf_counter()
+    past_key_values = StaticCache(
+        config=model.config, 
+        max_batch_size=1, max_cache_len=max_tokens, 
+        device='jax', dtype=model.dtype
+    )
+    cache_position = torch.arange(seq_length, device='jax')
+    generated_ids = []
+
+    logits, past_key_values = model(
+        input_ids, 
+        cache_position=cache_position, 
+        past_key_values=past_key_values, 
+        return_dict=False, 
+        use_cache=True
+    )
+    next_token = torch.argmax(logits[:, -1], dim=-1)[:, None]
+    generated_ids.append(next_token[:, 0].item())
+
+    cache_position = torch.tensor([seq_length + 1], device='jax')
+    for _ in range(1, max_tokens):
+        next_token, past_key_values = decode_one_tokens(
+          next_token.clone(), None, cache_position, past_key_values)
+        generated_ids.append(next_token.int().item())
+        cache_position += 1
+    end = time.perf_counter()
+
+  text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+  print(text)
+  print('Time: ', end - start)
+```
+
+output:
+
+```
+['1', '0', '0', '%', 'but', 'ter', '.', '\n', 'I', '’', 'm', 'not', 'sure', 'if', 'it', '’', 's', 'the', 'but', 'ter', 'or', 'the', 'eggs', ',', 'but', 'I', '’', 'm', 'pretty', 'sure', 'it', '’', 's', 'the', 'but', 'ter', '.', '\n', 'I', '’', 's', '\n', 'I', '’', 's', '\n', 'I', '’', '\n', 'I']
+Time:  88.39702287199907
+```
+
+We got the same output and faster time because of the staticness. We haven't even tried to compile yet!
+
+## Now let's jit it.
+
+To compile the function using `jax.jit`, we can use the helper function at `torchax.interop.jax_jit`.
+
+We make the following changes from the function above:
+
+```python
+  jitted = tx.interop.jax_jit(decode_one_tokens) # add this after defining decode_one_tokens
+  # replace this line
+-       next_token, past_key_values = decode_one_tokens(
+  # with this:
++       next_token, past_key_values = jitted(
+```
+in other words, we are jitting `decode_one_tokens`, 
+and replacing call to it with the jitted function.
+
+Here we use `tx.interop.jax_jit` instead of `jax.jit` because `jax.jit` acts on JAX functions (functions that takes jax arrays as input and output), here, we 
+are acting on torch functions (functions that takes and returns `torch.Tensor`).
+
+Running it, we have found this error:
+```
+Traceback (most recent call last):
+  File "/home/hanq_google_com/learning_machine/jax-huggingface/jax_hg_03.py", line 201, in <module>
+    autoregressive_decode_static(model, input_ids, tokenizer)
+  File "/home/hanq_google_com/learning_machine/jax-huggingface/jax_hg_03.py", line 177, in autoregressive_decode_static
+    next_token, past_key_values = jitted(
+  File "/home/hanq_google_com/pytorch/xla/torchax/torchax/interop.py", line 220, in call_jax
+    res: JaxValue = jax_func(*args, **kwargs)
+TypeError: Error interpreting argument to functools.partial(<function call_torch at 0x7d1cea648af0>, <function autoregressive_decode_static.<locals>.decode_one_tokens at 0x7d1c86d0e440>) as an abstract array. The problematic value is of type <class 'transformers.cache_utils.StaticCache'> and was passed to the function at path args[3].
+This typically means that a jit-wrapped function was called with a non-array argument, and this argument was not marked as static using the static_argnums or static_argnames parameters of jax.jit.
+```
+
+Recall [episode 1](jax-huggingface/01-run-huggingface-model-in-jax.md) we encountered exactly the same issue, namely, StaticCache need to be registered in pytree.
+
+To do that, we add the following:
+
+```python
+def _flatten_static_cache(cache):
+  return (
+      cache.key_cache,
+      cache.value_cache,
+  ), (cache._config, cache.max_batch_size, cache.max_cache_len)
+
+def _unflatten_static_cache(aux, children):
+  cache = cache_utils.StaticCache(*aux)
+  cache._config = aux[0]
+  cache.key_cache, cache.value_cache = children
+  return cache
+
+register_pytree_node(
+  cache_utils.StaticCache,
+  _flatten_static_cache,
+  _unflatten_static_cache,
+)
+```
+
+Running again it seems stuck with the following message:
+
+```
+/home/hanq_google_com/venv/lib/python3.10/site-packages/jax/_src/interpreters/mlir.py:1135: UserWarning: A large amount of constants were captured during lowering (13.48GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+```
+
+What is happening here? 
+So turns out, when you `jax.jit`, any data that is used but NOT passed in in
+function input arguments will be inlined in the graph as constants. 
+Having large constant will make the Graph big, and can make the compile time 
+longer. Sometimes, it can also OOM the instruction cache.
+
+Here we only have one function that is applied with `jax.jit` (through `tx.interop.jax_jit`)
+which is `  def decode_one_tokens(cur_token, input_pos, cache_position, past_key_values):`
+Looking it carefully, we notice that the model weights, which is a big chunk of input, 
+is not listed in the input args. Let's fix that.
+
+Replace decode_one_tokens with:
+```python
+  def decode_one_tokens(model_weights, cur_token, input_pos, cache_position, past_key_values):
+    logits, cache = torch.func.functional_call(
+        model, 
+        model_weights, # weight state_dict
+        (cur_token,), # args as tuple
+        dict(
+          position_ids=input_pos,
+          cache_position=cache_position,
+          past_key_values=past_key_values,
+          return_dict=False,
+          use_cache=True) # kwargs as dict
+    )
+    new_token = torch.argmax(logits[:, -1], dim=-1)[:, None]
+    return new_token, cache
+```
+
+Here, we added an input arg to `decode_one_tokens`. Now, we need to use
+this weight when computing the next logits. We can do so with 
+[`torch.func.functional_call`](https://docs.pytorch.org/docs/stable/generated/torch.func.functional_call.html)
+
+Running it again we got:
+
+```
+['1', '0', '0', '%', 'but', 'ter', '.', '\n', 'I', '’', 'm', 'not', 'sure', 'if', 'it', '’', 's', 'the', 'but', 'ter', 'or', 'the', 'eggs', ',', 'but', 'I', '’', 'm', 'pretty', 'sure', 'it', '’', 's', 'the', 'but', 'ter', '.', '\n', 'I', '’', 's', '\n', 'I', '’', 's', '\n', 'I', '’', '\n', 'I']
+Time:  14.7717966591008
+```
+
+Much much faster! The full repro is located at [jax_hg_03.py](jax-huggingface/jax_hg_03.py).
