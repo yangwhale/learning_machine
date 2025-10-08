@@ -3,9 +3,11 @@
 在之前的文章中（[第一部分](01-run-huggingface-model-in-jax-zh.md) 和 [第二部分](02-run-huggingface-model-distributed-zh.md)），我们探讨了如何调用 HuggingFace 模型的 `forward` 函数。现在让我们看看如何运行其自回归解码函数。但在此之前，让我们先深入了解 `torchax` 的工作原理。
 
 在开始之前，如果我们按照之前的示例安装了 `torchax`，请通过以下方式从 GitHub 重新安装：
+transformers 需要特地版本
 
 ```bash
-pip install git+https://github.com/pytorch/xla.git#subdirectory=torchax
+pip install git+https://github.com/google/torchax.git
+pip install transformers==4.48.0
 ```
 
 因为在编写本文时发现了一些最近的 bug 修复。
