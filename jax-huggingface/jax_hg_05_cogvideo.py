@@ -80,7 +80,7 @@ def setup_pytree_registrations():
     print("  - DecoderOutput 已注册")
 
 
-def load_cogvideo_pipeline(model_name="zai-org/CogVideoX-2b"):
+def load_cogvideo_pipeline(model_name="zai-org/CogVideoX1.5-5B"):
     """
     加载CogVideoX Pipeline
     
@@ -288,30 +288,37 @@ def setup_pipeline_for_jax(pipe):
     print(f"- 创建设备网格（设备数: {jax.device_count()}）...")
     mesh = jax.make_mesh((jax.device_count(),), ('axis',))
     
+    # 辅助函数：将模块权重移动到 XLA（参考 cog_tx_splash_attn.py）
+    def _move_module_to_xla(module):
+        """将模块的权重转换为 JAX Array，但先在 CPU 上操作"""
+        with jax.default_device('cpu'):
+            state_dict = module.state_dict()
+            state_dict = env.to_xla(state_dict)
+            module.load_state_dict(state_dict, assign=True)
+    
     with env:
-        # 将权重移动到JAX设备（即：使用jax.Array作为底层存储的tensors）
-        print("- 移动模型权重到JAX设备...")
-        pipe.to('jax')
-        
         # 移动scheduler参数
         move_scheduler_to_jax(pipe.scheduler)
         
-        # 对transformer权重进行分片
-        print("- 对Transformer权重进行分片...")
+        # 对 Transformer 进行处理：先移到 XLA，再分片
+        print("- 将Transformer移到XLA并进行分片...")
+        _move_module_to_xla(pipe.transformer)
         transformer_weights = shard_weights_transformer(mesh, pipe.transformer.state_dict())
         pipe.transformer.load_state_dict(transformer_weights, assign=True, strict=False)
         # 确保所有权重已分片完成
         torchax.interop.call_jax(jax.block_until_ready, transformer_weights)
         
-        # 对text_encoder权重进行分片
-        print("- 对Text Encoder权重进行分片...")
+        # 对 Text Encoder 进行处理：先移到 XLA，再分片
+        print("- 将Text Encoder移到XLA并进行分片...")
+        _move_module_to_xla(pipe.text_encoder)
         text_encoder_weights = shard_weights_text_encoder(mesh, pipe.text_encoder.state_dict())
         pipe.text_encoder.load_state_dict(text_encoder_weights, assign=True, strict=False)
         # 确保所有权重已分片完成
         torchax.interop.call_jax(jax.block_until_ready, text_encoder_weights)
         
-        # 对VAE权重进行分片
-        print("- 对VAE权重进行分片...")
+        # 对 VAE 进行处理：先移到 XLA，再分片
+        print("- 将VAE移到XLA并进行分片...")
+        _move_module_to_xla(pipe.vae)
         vae_weights = shard_weights_vae(mesh, pipe.vae.state_dict())
         pipe.vae.load_state_dict(vae_weights, assign=True, strict=False)
         # 确保所有权重已分片完成
@@ -423,7 +430,7 @@ def main():
     
     # 3. 加载CogVideoX模型
     print("\n3. 加载CogVideoX模型...")
-    pipe = load_cogvideo_pipeline("zai-org/CogVideoX-2b")
+    pipe = load_cogvideo_pipeline("zai-org/CogVideoX1.5-5B")
     
     # 4. 配置Pipeline以使用JAX
     print("\n4. 配置Pipeline以使用JAX...")
@@ -440,9 +447,9 @@ def main():
         frames, times = run_generation_benchmark(
             pipe,
             prompt,
-            num_inference_steps=50,
-            num_frames=16,  # 减少帧数以降低显存需求
-            num_iterations=3
+            num_inference_steps=10,
+            num_frames=3,  # 5B模型需要更少的帧数以避免编译时OOM
+            num_iterations=2
         )
     
     # 6. 保存生成的视频
