@@ -1,86 +1,490 @@
 import time
 import re
+import math
+import functools
+import numpy as np
 import jax
+import jax.numpy as jnp
 import torch
+import imageio
 from diffusers import CogVideoXPipeline
 from diffusers.models.autoencoders.vae import DecoderOutput
 import torchax
+from torchax.ops import ops_registry
 from jax.tree_util import register_pytree_node
-from jax.sharding import PartitionSpec as P, NamedSharding
+from jax.sharding import PartitionSpec as P, NamedSharding, Mesh
+from jax.experimental.pallas.ops.tpu import splash_attention
+from jax.experimental.shard_map import shard_map
+from jax.experimental import mesh_utils
 from transformers.modeling_outputs import BaseModelOutputWithPooling, BaseModelOutputWithPastAndCrossAttentions
+
+# JAX CogVideoX VAE 相关导入
+from flax import nnx
+from diffusers.pipelines.cogvideo.modeling_flax_cogvideox_vae import (
+    FlaxAutoencoderKLCogVideoXConfig,
+    FlaxAutoencoderKLCogVideoX,
+    FlaxAutoencoderKLCogVideoXCache,
+    load_cogvideox_vae,
+)
+from flax.linen import partitioning as nn_partitioning
+
+MODEL_NAME = "zai-org/CogVideoX1.5-5B"
+#### Splash Attention 配置参数 ####
+# Splash attention 块大小配置
+# 注意：这些值需要根据 TPU vmem 限制调整
+# 减小块大小以避免 vmem 超限（当前 vmem 限制约 32MB）
+BQSIZE = 2048           # Query 块大小（从 3024 减小）
+BKVSIZE = 1024          # Key/Value 块大小（从 2048 减小）
+BKVCOMPUTESIZE = 512    # Key/Value 计算块大小（从 1024 减小）
+
+# 窗口大小（None 表示使用完整注意力，否则使用局部窗口注意力）
+WINDOW_SIZE = None
+
+# 是否使用 K-smooth（对 key 进行平滑处理）
+USE_K_SMOOTH = True
+
+# Mesh 分片配置
+USE_DP = False          # 是否使用 data parallelism
+SP_NUM = 1             # Spatial parallelism 数量
+USE_FSDP = True        # 是否使用 FSDP 模式（vs Tensor Parallel）
+
+# VAE sharding 配置
+LOGICAL_AXIS_RULES = (
+    ('conv_out', ('tp','dp','sp')),
+    ('conv_in', ('tp','dp','sp'))
+)
+
+#### JAX VAE 辅助函数 ####
+# 参考: diffusers/cog_tx_splash_attn.py
+
+class ConfigWrapper:
+    """配置包装器，用于模拟 PyTorch VAE 的 config 对象"""
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+    def __getitem__(self, key):
+        return getattr(self, key)
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+
+def to_torch_recursive(x):
+    """递归地将 JAX 数组转换为 PyTorch 张量"""
+    if 'ArrayImpl' in str(type(x)) or isinstance(x, jnp.ndarray):
+        # 处理 JAX 数组
+        np_array = np.array(x)
+        # 如果是 bfloat16，通过 float32 转换
+        if hasattr(x, 'dtype') and x.dtype == jnp.bfloat16:
+            return torch.from_numpy(np_array.astype(np.float32)).to(torch.bfloat16)
+        else:
+            return torch.from_numpy(np_array)
+    elif isinstance(x, (list, tuple)):
+        return type(x)(to_torch_recursive(xx) for xx in x)
+    elif isinstance(x, dict):
+        return {k: to_torch_recursive(v) for k, v in x.items()}
+    elif hasattr(x, 'sample'):
+        sample = to_torch_recursive(x.sample)
+        if hasattr(x, 'replace'):
+            return x.replace(sample=sample)
+        else:
+            return sample
+    else:
+        return x
+
+
+def to_jax_recursive(x):
+    """递归地将 PyTorch 张量转换为 JAX 数组"""
+    if isinstance(x, torch.Tensor):
+        # 特别处理 BFloat16
+        if x.dtype == torch.bfloat16:
+            # 先转换为 float32，再转为 JAX 数组
+            return jnp.array(x.detach().to(torch.float32).cpu().numpy()).astype(jnp.bfloat16)
+        else:
+            return jnp.array(x.detach().cpu().numpy())
+    elif isinstance(x, (list, tuple)):
+        return type(x)(to_jax_recursive(xx) for xx in x)
+    elif isinstance(x, dict):
+        return {k: to_jax_recursive(v) for k, v in x.items()}
+    else:
+        return x
+
+
+class VAEProxy:
+    """JAX VAE 的 PyTorch 接口代理"""
+    def __init__(self, vae, vae_cache, dtype, config, mesh=None):
+        self._vae = vae
+        self.vae_cache = vae_cache
+        self.dtype = dtype
+        self.config = config
+        self._original_sample = None
+        self._mesh = mesh
+    
+    def __getattr__(self, name):
+        return getattr(self._vae, name)
+    
+    def clear_cache(self):
+        """清理缓存的样本以释放内存"""
+        self._original_sample = None
+    
+    def encode(self, sample, *args, **kwargs):
+        """编码：PyTorch -> JAX -> 编码 -> PyTorch"""
+        # 清理之前的 sample
+        self._original_sample = None
+        # 保存原始 sample 用于 decode
+        self._original_sample = sample
+        # 转换为 JAX 并编码
+        jax_sample = to_jax_recursive(sample)
+        out = self._vae.encode(jax_sample, *args, **kwargs)
+        return to_torch_recursive(out)
+    
+    def decode(self, latents, *args, **kwargs):
+        """解码：PyTorch -> JAX -> 解码 -> PyTorch"""
+        # 应用缩放因子
+        scaling_factor = self.config.scaling_factor if hasattr(self.config, 'scaling_factor') else 0.7
+        latents = latents / scaling_factor
+        
+        # 转换 latents 为 JAX 格式
+        jax_latents = to_jax_recursive(latents)
+        
+        print(f"DEBUG: VAE decode input shape: {jax_latents.shape}")
+        print(f"DEBUG: Latent stats - min: {float(jnp.min(jax_latents)):.4f}, max: {float(jnp.max(jax_latents)):.4f}")
+        
+        # 转换格式：PyTorch (NCDHW) -> JAX (NDHWC)
+        if len(jax_latents.shape) == 5:
+            B, C, T, H, W = jax_latents.shape
+            print(f"DEBUG: Input shape (PyTorch BCTHW): [B={B}, C={C}, T={T}, H={H}, W={W}]")
+            # BCTHW -> BTHWC
+            jax_latents = jax_latents.transpose(0, 2, 3, 4, 1)
+            print(f"DEBUG: After transpose to JAX (BTHWC): {jax_latents.shape}")
+            
+            # 应用 sharding
+            if self._mesh is not None:
+                try:
+                    latent_sharding = NamedSharding(self._mesh, P(None, None, 'sp', 'tp', None))
+                    jax_latents = jax.device_put(jax_latents, latent_sharding)
+                    print(f"DEBUG: Applied sharding to latents")
+                except Exception as e:
+                    print(f"DEBUG: Could not apply sharding: {e}")
+        
+        # 准备 sample 参数
+        if self._original_sample is None:
+            # 生成模式：使用 latents 自身作为 spatial conditioning
+            jax_sample = jax_latents
+            print(f"DEBUG: Using latents as spatial conditioning: {jax_sample.shape}")
+        else:
+            # 使用保存的 sample
+            sample = self._original_sample
+            jax_sample = to_jax_recursive(sample) if hasattr(sample, 'numpy') else sample
+            
+            if hasattr(jax_sample, 'shape') and len(jax_sample.shape) == 5:
+                print(f"DEBUG: Sample shape before transpose: {jax_sample.shape}")
+                # BCTHW -> BTHWC
+                jax_sample = jax_sample.transpose(0, 2, 3, 4, 1)
+                print(f"DEBUG: Sample shape after transpose: {jax_sample.shape}")
+        
+        # 执行解码
+        out = self._vae.decode(jax_latents, sample=jax_sample)
+        
+        # 转换输出格式：JAX (NDHWC) -> PyTorch (NCDHW)
+        if hasattr(out, 'shape') and len(out.shape) == 5:
+            print(f"DEBUG: VAE output shape (JAX): {out.shape}")
+            # BTHWC -> BCTHW
+            out = out.transpose(0, 4, 1, 2, 3)
+            print(f"DEBUG: After transpose to PyTorch: {out.shape}")
+        
+        # 转换为 PyTorch 张量
+        torch_out = to_torch_recursive(out)
+        
+        print(f"DEBUG: Output stats - min: {torch_out.min().item():.4f}, max: {torch_out.max().item():.4f}")
+        
+        # 包装为 DecoderOutput
+        return DecoderOutput(sample=torch_out)
+
+
+def _add_sharding_rule(vs: nnx.VariableState, logical_axis_rules) -> nnx.VariableState:
+    """为 VAE 参数添加 sharding 规则"""
+    vs.sharding_rules = logical_axis_rules
+    return vs
+
+
+@nnx.jit(static_argnums=(1,), donate_argnums=(0,))
+def create_sharded_logical_model(model, logical_axis_rules):
+    """创建带 logical sharding 的模型"""
+    graphdef, state, rest_of_state = nnx.split(model, nnx.Param, ...)
+    p_add_sharding_rule = functools.partial(_add_sharding_rule, logical_axis_rules=logical_axis_rules)
+    state = jax.tree.map(p_add_sharding_rule, state, is_leaf=lambda x: isinstance(x, nnx.VariableState))
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    model = nnx.merge(graphdef, sharded_state, rest_of_state)
+    return model
+
+
+def sharded_device_put(tensor, sharding):
+    """将张量放置到分片设备上"""
+    if isinstance(tensor, tuple):
+        return tuple(sharded_device_put(t, sharding) for t in tensor)
+    num_global_devices = jax.device_count()
+    num_local_devices = jax.local_device_count()
+    
+    if num_global_devices == num_local_devices:
+        return jax.device_put(tensor, sharding)
+    
+    shape = tensor.shape
+    x_split = [
+        jax.device_put(tensor[i], device)
+        for device, i in sharding.addressable_devices_indices_map(shape).items()
+    ]
+    return jax.make_array_from_single_device_arrays(shape, sharding, x_split)
+
+########################################
 
 
 def setup_jax_config():
     """配置JAX环境参数"""
     # jax.config.update('jax_default_matmul_precision', 'high')
-    print("JAX配置: 使用高精度矩阵乘法")
+    # print("JAX配置: 使用高精度矩阵乘法")
 
 
 def setup_pytree_registrations():
     """
     注册必要的pytree节点以支持JAX转换
-    
-    为各种transformers输出类型注册flatten和unflatten方法，
     使其可以在JAX的函数转换中正常使用
     """
-    print("注册transformers输出类型为pytree节点...")
+    print("注册PyTree节点...")
     
-    # 注册 BaseModelOutputWithPooling
-    def base_model_output_with_pooling_flatten(v):
-        """将BaseModelOutputWithPooling展平为元组"""
-        return (v.last_hidden_state, v.pooler_output, v.hidden_states, v.attentions), None
+    # 注册 PyTree 节点的通用 flatten 和 unflatten 方法
+    def model_output_flatten(obj):
+        """将模型输出对象展平为元组"""
+        return obj.to_tuple(), type(obj)
 
-    def base_model_output_with_pooling_unflatten(aux_data, children):
-        """从元组重建BaseModelOutputWithPooling"""
-        return BaseModelOutputWithPooling(*children)
-
-    register_pytree_node(
+    def model_output_unflatten(aux, children):
+        """从元组重建模型输出对象"""
+        return aux(*children)
+    
+    # 定义需要注册的所有类型
+    OUTPUT_CLASSES = [
         BaseModelOutputWithPooling,
-        base_model_output_with_pooling_flatten,
-        base_model_output_with_pooling_unflatten
-    )
-    print("  - BaseModelOutputWithPooling 已注册")
-    
-    # 注册 BaseModelOutputWithPastAndCrossAttentions
-    def base_model_output_with_past_flatten(v):
-        """将BaseModelOutputWithPastAndCrossAttentions展平为元组"""
-        return (
-            v.last_hidden_state,
-            v.past_key_values,
-            v.hidden_states,
-            v.attentions,
-            v.cross_attentions
-        ), None
-
-    def base_model_output_with_past_unflatten(aux_data, children):
-        """从元组重建BaseModelOutputWithPastAndCrossAttentions"""
-        return BaseModelOutputWithPastAndCrossAttentions(*children)
-
-    register_pytree_node(
         BaseModelOutputWithPastAndCrossAttentions,
-        base_model_output_with_past_flatten,
-        base_model_output_with_past_unflatten
-    )
-    print("  - BaseModelOutputWithPastAndCrossAttentions 已注册")
-    
-    # 注册 DecoderOutput
-    def decoder_output_flatten(v):
-        """将DecoderOutput展平为元组"""
-        return (v.sample,), None
-
-    def decoder_output_unflatten(aux_data, children):
-        """从元组重建DecoderOutput"""
-        return DecoderOutput(sample=children[0])
-
-    register_pytree_node(
         DecoderOutput,
-        decoder_output_flatten,
-        decoder_output_unflatten
+    ]
+
+    # 批量注册
+    for cls in OUTPUT_CLASSES:
+        register_pytree_node(cls, model_output_flatten, model_output_unflatten)
+        print(f"  - {cls.__name__} 已注册")
+
+#### Splash Attention 实现 ####
+
+def _sdpa_reference(
+    query,
+    key,
+    value,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal=False,
+    scale=None,
+    enable_gqa=False,
+) -> torch.Tensor:
+    """
+    Scaled Dot-Product Attention 参考实现
+    
+    用于在不支持 Splash attention 时作为回退方案
+    """
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+    if is_causal:
+        assert attn_mask is None
+        temp_mask = torch.ones(
+            L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        attn_bias.to(query.dtype)
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn_bias += attn_mask
+    if enable_gqa:
+        key = key.repeat_interleave(query.size(-3) // key.size(-3), -3)
+        value = value.repeat_interleave(query.size(-3) // value.size(-3), -3)
+
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    if dropout_p > 0:
+        attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    return attn_weight @ value
+
+
+def _tpu_splash_attention(query, key, value, env, scale=None, is_causal=False, window_size=None):
+    """
+    TPU Splash Attention 实现
+    
+    使用 JAX 的 Splash Attention 在 TPU 上高效计算注意力
+    支持可选的局部窗口注意力和 K-smooth
+    
+    Args:
+        query: Query 张量 [batch, num_heads, seq_len, head_dim]
+        key: Key 张量 [batch, num_heads, seq_len, head_dim]
+        value: Value 张量 [batch, num_heads, seq_len, head_dim]
+        env: torchax 环境
+        scale: 缩放因子（默认为 1/sqrt(head_dim)）
+        is_causal: 是否使用因果掩码
+        window_size: 局部窗口大小（None 表示全局注意力）
+        
+    Returns:
+        注意力输出张量
+    """
+    mesh = env._mesh
+    num_heads = query.shape[1]
+
+    # 在设备切片上执行的注意力函数
+    def _attention_on_slices(q, k, v):
+        # 缩放 query 张量
+        scale_factor = 1.0 / math.sqrt(q.shape[-1]) if scale is None else scale
+        q = q * scale_factor
+
+        # 辅助函数：填充到指定倍数
+        def pad_to_multiple(x, multiple, axis):
+            seq_len = x.shape[axis]
+            pad_len = (multiple - seq_len % multiple) % multiple
+            if pad_len == 0:
+                return x, seq_len
+            pad_width = [(0, 0)] * x.ndim
+            pad_width[axis] = (0, pad_len)
+            return jnp.pad(x, pad_width), seq_len
+
+        # 在批次维度上操作的核函数
+        def kernel_3d(q_3d, k_3d, v_3d):
+            q_seq_len = q_3d.shape[1]
+            kv_seq_len = k_3d.shape[1]
+            num_heads_on_device = q_3d.shape[0]
+
+            # 填充到块大小的倍数
+            q_3d_padded, q_orig_len = pad_to_multiple(q_3d, BQSIZE, axis=1)
+            k_3d_padded, k_orig_len = pad_to_multiple(k_3d, BKVSIZE, axis=1)
+            v_3d_padded, v_orig_len = pad_to_multiple(v_3d, BKVSIZE, axis=1)
+
+            padded_q_seq_len = q_3d_padded.shape[1]
+            padded_kv_seq_len = k_3d_padded.shape[1]
+
+            # 创建注意力掩码
+            if window_size is not None:
+                mask_class = functools.partial(splash_attention.LocalMask, window_size=window_size, offset=0)
+            else:
+                mask_class = splash_attention.FullMask
+
+            mask = splash_attention.MultiHeadMask(
+                [mask_class((padded_q_seq_len, padded_kv_seq_len)) for _ in range(num_heads_on_device)]
+            )
+
+            # 配置块大小
+            block_sizes = splash_attention.BlockSizes(
+                block_q=min(BQSIZE, padded_q_seq_len),
+                block_kv=min(BKVSIZE, padded_kv_seq_len),
+                block_kv_compute=min(BKVCOMPUTESIZE, padded_kv_seq_len),
+            )
+            
+            # 创建并执行 Splash attention kernel
+            splash_kernel = splash_attention.make_splash_mha(
+                mask=mask, block_sizes=block_sizes, head_shards=1, q_seq_shards=1
+            )
+            out = splash_kernel(q_3d_padded, k_3d_padded, v_3d_padded)
+            
+            # 移除填充
+            return out[:, :q_orig_len, ...]
+
+        # 在批次维度上映射 kernel
+        vmapped_kernel = jax.vmap(kernel_3d, in_axes=(0, 0, 0), out_axes=0)
+        return vmapped_kernel(q, k, v)
+
+    # 根据设备数量和头数确定分片策略
+    # 参考: diffusers/cog_tx_splash_attn.py 第 287-301 行
+    if num_heads < mesh.size:
+        # 头数太少，复制到所有设备
+        q_partition_spec = P()
+        kv_partition_spec = P()
+    else:
+        # 根据 query 和 key 的序列长度判断是自注意力还是交叉注意力
+        # 自注意力：q 和 k 序列长度相同
+        # 交叉注意力：q 和 k 序列长度不同
+        if query.shape[2] == key.shape[2]:  # 自注意力
+            # 在三维 mesh 上分片 (dp, tp, sp, None)
+            q_partition_spec = P('dp', 'tp', 'sp', None)
+            kv_partition_spec = P('dp', 'tp', None, None)
+        else:  # 交叉注意力
+            # 交叉注意力的 sharding 策略不同
+            q_partition_spec = P('dp', None, ('tp', 'sp'), None)
+            kv_partition_spec = P('dp', None, None, None)
+
+    # 使用 shard_map 在设备间分片执行
+    sharded_fn = shard_map(
+        _attention_on_slices,
+        mesh=mesh,
+        in_specs=(q_partition_spec, kv_partition_spec, kv_partition_spec),
+        out_specs=q_partition_spec,
+        check_rep=False,
     )
-    print("  - DecoderOutput 已注册")
+    out = sharded_fn(query, key, value)
+    
+    # 应用输出 sharding constraint
+    # 使用 NamedSharding 而不是 PartitionSpec，避免需要 mesh context
+    # output_sharding = NamedSharding(mesh, P('dp', None, ('tp', 'sp'), None))
+    # out = jax.lax.with_sharding_constraint(out, output_sharding)
+    
+    return out
 
 
-def load_cogvideo_pipeline(model_name="zai-org/CogVideoX1.5-5B"):
+def scaled_dot_product_attention(
+    query,
+    key,
+    value,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal=False,
+    scale=None,
+    enable_gqa=False,
+    env=None,
+    window_size=None,
+) -> torch.Tensor:
+    """
+    Scaled Dot-Product Attention 封装函数
+    
+    根据环境配置选择使用 TPU Splash Attention 或参考实现
+    
+    Args:
+        query: Query 张量
+        key: Key 张量
+        value: Value 张量
+        attn_mask: 注意力掩码（可选）
+        dropout_p: Dropout 概率
+        is_causal: 是否使用因果掩码
+        scale: 缩放因子
+        enable_gqa: 是否启用 GQA (Grouped Query Attention)
+        env: torchax 环境
+        window_size: 局部窗口大小（用于 Splash Attention）
+        
+    Returns:
+        注意力输出张量
+    """
+    if env is not None and hasattr(env.config, 'use_tpu_splash_attention') and env.config.use_tpu_splash_attention:
+        # 使用 TPU Splash Attention
+        jquery, jkey, jvalue = env.t2j_iso((query, key, value))
+        
+        # 可选的 K-smooth 处理
+        if USE_K_SMOOTH:
+            key_mean = jnp.mean(jkey, axis=2, keepdims=True)
+            jkey = jkey - key_mean
+        
+        res = _tpu_splash_attention(jquery, jkey, jvalue, env, scale=scale, is_causal=is_causal, window_size=window_size)
+        return env.j2t_iso(res)
+    
+    # 回退到参考实现
+    return _sdpa_reference(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa)
+
+########################################
+
+
+def load_cogvideo_pipeline(model_name=MODEL_NAME):
     """
     加载CogVideoX Pipeline
     
@@ -97,43 +501,45 @@ def load_cogvideo_pipeline(model_name="zai-org/CogVideoX1.5-5B"):
 
 
 # Transformer sharding策略 - FSDP模式（默认）
-# 参考: diffusers/cog_tx_splash_attn.py
+# 参考: diffusers/cog_tx_splash_attn.py 第 82-91 行
 # 注意：所有模式都以 .weight$ 结尾，这样不会匹配到 bias 等1维参数
+# 使用三维 mesh (tp, dp, sp)
 transformer_shardings_fsdp = {
     # Attention layers - 在输出维度分片
-    r'.*\.to_q\.weight$': (None, 'axis'),
-    r'.*\.to_k\.weight$': (None, 'axis'),
-    r'.*\.to_v\.weight$': (None, 'axis'),
-    r'.*\.to_out.*\.weight$': ('axis', None),
+    r'.*\.to_q\.weight$': (None, ('tp', 'sp')),
+    r'.*\.to_k\.weight$': (None, ('tp', 'sp')),
+    r'.*\.to_v\.weight$': (None, ('tp', 'sp')),
+    r'.*\.to_out.*\.weight$': (('tp', 'sp'), None),
     # Feedforward layers
-    r'.*\.ff\.net\.0\.weight$': (None, 'axis'),
-    r'.*\.ff\.net\.2\.weight$': ('axis', None),
+    r'.*\.ff\.net\.0\.weight$': (None, ('tp', 'sp')),
+    r'.*\.ff\.net\.2\.weight$': (('tp', 'sp'), None),
 }
 
 # Transformer sharding策略 - Tensor Parallel模式
+# 参考: diffusers/cog_tx_splash_attn.py 第 93-102 行
 transformer_shardings_tp = {
     # Attention layers - 在输入维度分片
-    r'.*\.to_q\.weight$': ('axis', None),
-    r'.*\.to_k\.weight$': ('axis', None),
-    r'.*\.to_v\.weight$': ('axis', None),
-    r'.*\.to_out.*\.weight$': (None, 'axis'),
+    r'.*\.to_q\.weight$': (('tp', 'sp'), None),
+    r'.*\.to_k\.weight$': (('tp', 'sp'), None),
+    r'.*\.to_v\.weight$': (('tp', 'sp'), None),
+    r'.*\.to_out.*\.weight$': (None, ('tp', 'sp')),
     # Feedforward layers
-    r'.*\.ff\.net\.0\.weight$': ('axis', None),
-    r'.*\.ff\.net\.2\.weight$': (None, 'axis'),
+    r'.*\.ff\.net\.0\.weight$': (('tp', 'sp'), None),
+    r'.*\.ff\.net\.2\.weight$': (None, ('tp', 'sp')),
 }
 
 # Text Encoder (T5) sharding策略
-# 参考: diffusers/cog_tx_splash_attn.py
-# 简化版本，只使用 axis 维度（原始版本使用 axis,dp,sp）
+# 参考: diffusers/cog_tx_splash_attn.py 第 104-116 行
+# 使用三维 mesh (tp, dp, sp)
 text_encoder_shardings = {
-    r'shared\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.q\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.k\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.v\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.o\.weight$': (None, 'axis'),
-    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wi_0\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wi_1\.weight$': ('axis',),
-    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wo\.weight$': (None, 'axis'),
+    r'shared\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.q\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.k\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.v\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.SelfAttention\.o\.weight$': (None, ('tp', 'dp', 'sp')),
+    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wi_0\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wi_1\.weight$': (('tp', 'dp', 'sp'),),
+    r'encoder\.block\.\d+\.layer\.\d+\.DenseReluDense\.wo\.weight$': (None, ('tp', 'dp', 'sp')),
 }
 
 # VAE sharding策略
@@ -141,25 +547,21 @@ text_encoder_shardings = {
 # 参考: diffusers/cog_tx_splash_attn.py 中的 LOGICAL_AXIS_RULES
 vae_shardings = {
     # Encoder 卷积层 - 在输出通道分片
-    r'encoder\..*\.conv\.weight$': ('axis', None, None, None),
-    r'encoder\..*\.conv_in\.weight$': ('axis', None, None, None),
-    r'encoder\..*\.conv_out\.weight$': ('axis', None, None, None),
+    r'encoder\..*\.conv\.weight$': ('tp', None, None, None),
+    r'encoder\..*\.conv_in\.weight$': ('tp', None, None, None),
+    r'encoder\..*\.conv_out\.weight$': ('tp', None, None, None),
     # Decoder 卷积层 - 在输出通道分片
-    r'decoder\..*\.conv\.weight$': ('axis', None, None, None),
-    r'decoder\..*\.conv_in\.weight$': ('axis', None, None, None),
-    r'decoder\..*\.conv_out\.weight$': ('axis', None, None, None),
+    r'decoder\..*\.conv\.weight$': ('tp', None, None, None),
+    r'decoder\..*\.conv_in\.weight$': ('tp', None, None, None),
+    r'decoder\..*\.conv_out\.weight$': ('tp', None, None, None),
     # 其他卷积层
-    r'.*\.conv_shortcut\.weight$': ('axis', None, None, None),
+    r'.*\.conv_shortcut\.weight$': ('tp', None, None, None),
 }
 
 
 def shard_weights_transformer(mesh, weights, use_fsdp=True):
     """
     对CogVideoX Transformer模型的权重进行分片
-    
-    参考 diffusers/cog_tx_splash_attn.py 中的 _shard_weight_dict 函数
-    使用正则表达式匹配权重名称，应用对应的分片规则
-    
     关键点：
     - 只匹配以 .weight 结尾的参数，避免对1维的 bias 等参数进行错误分片
     - 使用 apply_jax_ (in-place) 而不是 apply_jax
@@ -198,9 +600,7 @@ def shard_weights_transformer(mesh, weights, use_fsdp=True):
 def shard_weights_text_encoder(mesh, weights):
     """
     对Text Encoder (T5)模型的权重进行分片
-    
-    参考 diffusers/cog_tx_splash_attn.py 中的text_encoder_shardings
-    
+        
     Args:
         mesh: JAX设备网格
         weights: Text Encoder权重字典
@@ -251,57 +651,119 @@ def shard_weights_vae(mesh, weights):
     return result
 
 
-def move_scheduler_to_jax(scheduler):
-    """
-    将scheduler的所有Tensor移动到JAX设备
-    
-    Args:
-        scheduler: 调度器对象
-    """
-    print("将scheduler参数移动到JAX设备...")
-    for k, v in scheduler.__dict__.items():
-        if isinstance(v, torch.Tensor):
-            setattr(scheduler, k, v.to('jax'))
-
-
-def setup_pipeline_for_jax(pipe):
+def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
     """
     设置Pipeline以在JAX环境中运行
     
     将所有模型权重移动到JAX设备并编译关键组件:
     - Transformer: DiT模型的核心网络
-    - VAE: 用于编码/解码视频帧
+    - VAE: 使用 JAX 原生实现（支持长视频）
     - Text Encoder: 文本编码器
     
-    Args:
-        pipe: CogVideoX Pipeline
-        
-    Returns:
-        pipe: 配置后的Pipeline
-        env: torchax环境
-        mesh: JAX设备网格
+    同时注册自定义的 Splash Attention 实现
     """
     print("\n配置Pipeline以使用JAX...")
+
+    tp_dim, dp_dim, sp_dim = jax.device_count(), 1, 1
+    # 根据配置调整维度
+    if USE_DP:  # 默认 False
+        tp_dim //= 2
+        dp_dim = 2
+    
+    if SP_NUM > 1:  # 默认 1
+        tp_dim //= SP_NUM
+        sp_dim = SP_NUM
+    
+    print(f"  Mesh 维度: tp_dim={tp_dim}, dp_dim={dp_dim}, sp_dim={sp_dim}")
+    
+    # 创建三维 mesh (tp, dp, sp)
+    mesh_devices = mesh_utils.create_device_mesh((tp_dim, dp_dim, sp_dim), allow_split_physical_axes=True)
+    mesh = Mesh(mesh_devices, ('tp', 'dp', 'sp'))
+    
+    # 初始化 JAX VAE（在创建 torchax env 之前）
+    print("- 初始化 JAX 原生 VAE...")
+    key = jax.random.key(0)
+    rngs = nnx.Rngs(key)
+    
+    # 加载 VAE 配置
+    cog_vae_config = FlaxAutoencoderKLCogVideoX.config_class.from_config(
+        FlaxAutoencoderKLCogVideoX.config_class.load_config(model_id, subfolder="vae")
+    )
+    
+    with mesh:
+        # 创建 VAE 模型结构，并没有加载任何预训练参数
+        cog_vae = FlaxAutoencoderKLCogVideoX(config=cog_vae_config, rngs=rngs)
+        print(f"  VAE 模型已创建")
+        
+        # 创建 VAE cache
+        cog_vae_cache = FlaxAutoencoderKLCogVideoXCache(cog_vae)
+        
+        # 加载预训练权重
+        print("  加载 VAE 预训练权重...")
+        loaded_weights = load_cogvideox_vae(model_id, {}, "tpu")
+        
+        # 应用 sharding 并转换为 bfloat16
+        sharding = NamedSharding(mesh, P())
+        params = jax.tree_util.tree_map(lambda x: sharded_device_put(x, sharding), loaded_weights)
+        params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), params)
+        
+        # 合并权重到模型
+        graphdef, _ = nnx.split(cog_vae)
+        cog_vae = nnx.merge(graphdef, params)
+        print("  VAE 权重已加载")
+        
+        # 应用 logical sharding
+        print("  应用 VAE sharding...")
+        cog_vae = create_sharded_logical_model(cog_vae, LOGICAL_AXIS_RULES)
+        print("  VAE 初始化完成")
+    
+    # 创建 torchax 环境
     env = torchax.default_env()
     
-    # 创建设备网格（用于分片）
-    print(f"- 创建设备网格（设备数: {jax.device_count()}）...")
-    mesh = jax.make_mesh((jax.device_count(),), ('axis',))
+    # 配置环境以启用 TPU Splash Attention
+    env._mesh = mesh
+    env.config.use_tpu_splash_attention = True
+    jax_cog_vae = VAEProxy(cog_vae, cog_vae_cache, torch.bfloat16, cog_vae_config, mesh=mesh)
+    pipe.vae = jax_cog_vae  # 替换 Pipeline 的 VAE
+    # 注册自定义的 Scaled Dot-Product Attention
+    print(f"- 注册 Splash Attention（窗口大小: {WINDOW_SIZE}）...")
+    custom_attention = functools.partial(
+        scaled_dot_product_attention,
+        env=env,
+        window_size=WINDOW_SIZE
+    )
     
-    # 辅助函数：将模块权重移动到 XLA（参考 cog_tx_splash_attn.py）
+    # 覆盖 PyTorch 的 scaled_dot_product_attention
+    op_to_override = torch.nn.functional.scaled_dot_product_attention
+    env._ops[op_to_override] = ops_registry.Operator(
+        op_to_override,
+        custom_attention,
+        is_jax_function=False,
+        is_user_defined=True,
+        needs_env=False,
+        is_view_op=False,
+    )
+    
+    # 辅助函数：将scheduler模块权重移动到 XLA
+    def _move_scheduler_to_jax(scheduler):
+        print("将scheduler参数移动到JAX设备...")
+        for k, v in scheduler.__dict__.items():
+            if isinstance(v, torch.Tensor):
+                setattr(scheduler, k, v.to('jax'))
+
+    # 辅助函数：将模块权重移动到 XLA
     def _move_module_to_xla(module):
         """将模块的权重转换为 JAX Array，但先在 CPU 上操作"""
         with jax.default_device('cpu'):
-            state_dict = module.state_dict()
+            state_dict=module.state_dict()
             state_dict = env.to_xla(state_dict)
             module.load_state_dict(state_dict, assign=True)
     
     with env:
         # 移动scheduler参数
-        move_scheduler_to_jax(pipe.scheduler)
+        _move_scheduler_to_jax(pipe.scheduler)
         
         # 对 Transformer 进行处理：先移到 XLA，再分片
-        print("- 将Transformer移到XLA并进行分片...")
         _move_module_to_xla(pipe.transformer)
         transformer_weights = shard_weights_transformer(mesh, pipe.transformer.state_dict())
         pipe.transformer.load_state_dict(transformer_weights, assign=True, strict=False)
@@ -316,16 +778,9 @@ def setup_pipeline_for_jax(pipe):
         # 确保所有权重已分片完成
         torchax.interop.call_jax(jax.block_until_ready, text_encoder_weights)
         
-        # 对 VAE 进行处理：先移到 XLA，再分片
-        print("- 将VAE移到XLA并进行分片...")
-        _move_module_to_xla(pipe.vae)
-        vae_weights = shard_weights_vae(mesh, pipe.vae.state_dict())
-        pipe.vae.load_state_dict(vae_weights, assign=True, strict=False)
-        # 确保所有权重已分片完成
-        torchax.interop.call_jax(jax.block_until_ready, vae_weights)
+        #跳过 VAE，因为已经是 JAX 原生实现
         
         # 编译transformer（DiT的核心网络）
-        print("- 编译transformer...")
         pipe.transformer = torchax.compile(
             pipe.transformer,
             torchax.CompileOptions(
@@ -333,35 +788,18 @@ def setup_pipeline_for_jax(pipe):
             )
         )
         
-        # 编译VAE的decode方法（用于将latent转换为视频帧）
-        print("- 编译VAE...")
-        pipe.vae = torchax.compile(
-            pipe.vae, 
-            torchax.CompileOptions(
-                methods_to_compile=['decode'],
-                jax_jit_kwargs={'static_argnames': ('return_dict', )}
-            )
-        )
+        # 暂时跳过 VAE 编译，因为是 JAX 原生实现，且已经很快
         
         # 编译文本编码器
-        print("- 编译Text Encoder...")
-        pipe.text_encoder = torchax.compile(pipe.text_encoder)
+        # pipe.text_encoder = torchax.compile(pipe.text_encoder)
     
     print("Pipeline配置完成")
     return pipe, env, mesh
 
 
-def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49, num_iterations=3):
+def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49, num_iterations=2):
     """
     运行视频生成基准测试
-    
-    Args:
-        pipe: CogVideoX Pipeline
-        prompt: 文本提示
-        num_inference_steps: 推理步数
-        num_frames: 视频帧数
-        num_iterations: 迭代次数
-        
     Returns:
         frames: 最后生成的视频帧
         times: 各次迭代的时间列表
@@ -375,28 +813,33 @@ def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49
     frames = None
     
     for i in range(num_iterations):
+        if i == 0:
+            print(f"\n迭代 {i} (包含 JIT 编译，会比较慢):")
+        else:
+            print(f"\n迭代 {i} (使用已编译代码):")
+        
         start = time.perf_counter()
         result = pipe(prompt, num_inference_steps=num_inference_steps, num_frames=num_frames)
         frames = result.frames[0]  # CogVideoX 返回 frames 而不是 images
         end = time.perf_counter()
         elapsed = end - start
         times.append(elapsed)
-        print(f"迭代 {i}: {elapsed:.4f} 秒")
+        
+        if i == 0:
+            print(f"  完成时间: {elapsed:.2f} 秒 (包含 Transformer + Text Encoder 的真正 JIT 编译)")
+        else:
+            print(f"  完成时间: {elapsed:.2f} 秒")
+        
+        # 显式删除中间结果以释放内存
+        del result
     
     return frames, times
 
-
 def print_performance_summary(times):
     """
-    打印性能统计摘要
-    
     Args:
         times: 时间列表
     """
-    print("\n" + "=" * 60)
-    print("性能统计摘要")
-    print("=" * 60)
-    
     if len(times) > 0:
         print(f"总迭代次数: {len(times)}")
         print(f"第一次运行（含编译）: {times[0]:.4f} 秒")
@@ -413,60 +856,38 @@ def print_performance_summary(times):
         for i, t in enumerate(times):
             print(f"  迭代 {i}: {t:.4f} 秒")
 
-
 def main():
-    """主函数"""
-    print("=" * 60)
-    print("JAX + CogVideoX 视频生成示例")
-    print("=" * 60)
-    
-    # 1. 配置JAX环境
-    print("\n1. 配置JAX环境...")
-    setup_jax_config()
-    
-    # 2. 设置pytree注册
-    print("\n2. 设置pytree注册...")
+    # Set JAX config to enable compilation cache
+    jax.config.update("jax_compilation_cache_dir", "/dev/shm/jax_cache")
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+    jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+
+    torch.set_default_dtype(torch.bfloat16)
+ 
     setup_pytree_registrations()
     
-    # 3. 加载CogVideoX模型
-    print("\n3. 加载CogVideoX模型...")
-    pipe = load_cogvideo_pipeline("zai-org/CogVideoX1.5-5B")
-    
-    # 4. 配置Pipeline以使用JAX
-    print("\n4. 配置Pipeline以使用JAX...")
+    pipe = CogVideoXPipeline.from_pretrained(MODEL_NAME)
+    print("\n 配置Pipeline以使用JAX、Splash Attention 和 JAX 原生 VAE...")
     pipe, env, mesh = setup_pipeline_for_jax(pipe)
-    
-    # 5. 运行视频生成基准测试
-    print("\n" + "=" * 60)
-    print("5. 运行视频生成基准测试")
-    print("=" * 60)
     
     prompt = "A cat walks on the grass, realistic style."
     
-    with env:
+    with mesh, nn_partitioning.axis_rules(LOGICAL_AXIS_RULES), env:
         frames, times = run_generation_benchmark(
             pipe,
             prompt,
-            num_inference_steps=10,
-            num_frames=3,  # 5B模型需要更少的帧数以避免编译时OOM
-            num_iterations=2
+            num_inference_steps=20,
+            num_frames=25,
+            num_iterations=1
         )
     
-    # 6. 保存生成的视频
-    print("\n6. 保存生成的视频...")
+    print("\n 保存生成的视频...")
     output_path = 'output_video.mp4'
-    # 导入必要的库来保存视频
-    import imageio
     imageio.mimsave(output_path, frames, fps=8)
     print(f"视频已保存到: {output_path}")
     
-    # 7. 打印性能摘要
     print_performance_summary(times)
-    
-    print("\n" + "=" * 60)
-    print("视频生成完成！")
-    print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
