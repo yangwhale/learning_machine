@@ -428,8 +428,8 @@ def _tpu_splash_attention(query, key, value, env, scale=None, is_causal=False, w
     
     # 应用输出 sharding constraint
     # 使用 NamedSharding 而不是 PartitionSpec，避免需要 mesh context
-    output_sharding = NamedSharding(mesh, P('dp', None, ('tp', 'sp'), None))
-    out = jax.lax.with_sharding_constraint(out, output_sharding)
+    # output_sharding = NamedSharding(mesh, P('dp', None, ('tp', 'sp'), None))
+    # out = jax.lax.with_sharding_constraint(out, output_sharding)
     
     return out
 
@@ -680,42 +680,42 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
     mesh_devices = mesh_utils.create_device_mesh((tp_dim, dp_dim, sp_dim), allow_split_physical_axes=True)
     mesh = Mesh(mesh_devices, ('tp', 'dp', 'sp'))
     
-    # # 初始化 JAX VAE（在创建 torchax env 之前）
-    # print("- 初始化 JAX 原生 VAE...")
-    # key = jax.random.key(0)
-    # rngs = nnx.Rngs(key)
+    # 初始化 JAX VAE（在创建 torchax env 之前）
+    print("- 初始化 JAX 原生 VAE...")
+    key = jax.random.key(0)
+    rngs = nnx.Rngs(key)
     
-    # # 加载 VAE 配置
-    # cog_vae_config = FlaxAutoencoderKLCogVideoX.config_class.from_config(
-    #     FlaxAutoencoderKLCogVideoX.config_class.load_config(model_id, subfolder="vae")
-    # )
+    # 加载 VAE 配置
+    cog_vae_config = FlaxAutoencoderKLCogVideoX.config_class.from_config(
+        FlaxAutoencoderKLCogVideoX.config_class.load_config(model_id, subfolder="vae")
+    )
     
-    # with mesh:
-    #     # 创建 VAE 模型结构，并没有加载任何预训练参数
-    #     cog_vae = FlaxAutoencoderKLCogVideoX(config=cog_vae_config, rngs=rngs)
-    #     print(f"  VAE 模型已创建")
+    with mesh:
+        # 创建 VAE 模型结构，并没有加载任何预训练参数
+        cog_vae = FlaxAutoencoderKLCogVideoX(config=cog_vae_config, rngs=rngs)
+        print(f"  VAE 模型已创建")
         
-    #     # 创建 VAE cache
-    #     cog_vae_cache = FlaxAutoencoderKLCogVideoXCache(cog_vae)
+        # 创建 VAE cache
+        cog_vae_cache = FlaxAutoencoderKLCogVideoXCache(cog_vae)
         
-    #     # 加载预训练权重
-    #     print("  加载 VAE 预训练权重...")
-    #     loaded_weights = load_cogvideox_vae(model_id, {}, "tpu")
+        # 加载预训练权重
+        print("  加载 VAE 预训练权重...")
+        loaded_weights = load_cogvideox_vae(model_id, {}, "tpu")
         
-    #     # 应用 sharding 并转换为 bfloat16
-    #     sharding = NamedSharding(mesh, P())
-    #     params = jax.tree_util.tree_map(lambda x: sharded_device_put(x, sharding), loaded_weights)
-    #     # params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), params)
+        # 应用 sharding 并转换为 bfloat16
+        sharding = NamedSharding(mesh, P())
+        params = jax.tree_util.tree_map(lambda x: sharded_device_put(x, sharding), loaded_weights)
+        params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), params)
         
-    #     # 合并权重到模型
-    #     graphdef, _ = nnx.split(cog_vae)
-    #     cog_vae = nnx.merge(graphdef, params)
-    #     print("  VAE 权重已加载")
+        # 合并权重到模型
+        graphdef, _ = nnx.split(cog_vae)
+        cog_vae = nnx.merge(graphdef, params)
+        print("  VAE 权重已加载")
         
-    #     # 应用 logical sharding
-    #     print("  应用 VAE sharding...")
-    #     cog_vae = create_sharded_logical_model(cog_vae, LOGICAL_AXIS_RULES)
-    #     print("  VAE 初始化完成")
+        # 应用 logical sharding
+        print("  应用 VAE sharding...")
+        cog_vae = create_sharded_logical_model(cog_vae, LOGICAL_AXIS_RULES)
+        print("  VAE 初始化完成")
     
     # 创建 torchax 环境
     env = torchax.default_env()
@@ -723,9 +723,8 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
     # 配置环境以启用 TPU Splash Attention
     env._mesh = mesh
     env.config.use_tpu_splash_attention = True
-    # jax_cog_vae = VAEProxy(cog_vae, cog_vae_cache, torch.bfloat16, cog_vae_config, mesh=mesh)
-    # pipe.vae = jax_cog_vae  # 替换 Pipeline 的 VAE
-
+    jax_cog_vae = VAEProxy(cog_vae, cog_vae_cache, torch.bfloat16, cog_vae_config, mesh=mesh)
+    pipe.vae = jax_cog_vae  # 替换 Pipeline 的 VAE
     # 注册自定义的 Scaled Dot-Product Attention
     print(f"- 注册 Splash Attention（窗口大小: {WINDOW_SIZE}）...")
     custom_attention = functools.partial(
@@ -779,13 +778,7 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
         # 确保所有权重已分片完成
         torchax.interop.call_jax(jax.block_until_ready, text_encoder_weights)
         
-        # 对 Text Encoder 进行处理：先移到 XLA，再分片
-        print("- 将Text Encoder移到XLA并进行分片...")
-        _move_module_to_xla(pipe.vae)
-        vae_weights = shard_weights_vae(mesh, pipe.vae.state_dict())
-        pipe.vae.load_state_dict(vae_weights, assign=True, strict=False)
-        # 确保所有权重已分片完成
-        torchax.interop.call_jax(jax.block_until_ready, vae_weights)
+        #跳过 VAE，因为已经是 JAX 原生实现
         
         # 编译transformer（DiT的核心网络）
         pipe.transformer = torchax.compile(
@@ -795,13 +788,7 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
             )
         )
         
-        # 编译vae
-        pipe.vae = torchax.compile(
-            pipe.vae,
-            torchax.CompileOptions(
-                jax_jit_kwargs={'static_argnames': ('return_dict', )}
-            )
-        )
+        # 暂时跳过 VAE 编译，因为是 JAX 原生实现，且已经很快
         
         # 编译文本编码器
         # pipe.text_encoder = torchax.compile(pipe.text_encoder)
@@ -891,7 +878,7 @@ def main():
             pipe,
             prompt,
             num_inference_steps=20,
-            num_frames=1,
+            num_frames=25,
             num_iterations=1
         )
     
