@@ -18,14 +18,6 @@ from jax.experimental.shard_map import shard_map
 from jax.experimental import mesh_utils
 from transformers.modeling_outputs import BaseModelOutputWithPooling, BaseModelOutputWithPastAndCrossAttentions
 
-# JAX CogVideoX VAE 相关导入
-from flax import nnx
-from diffusers.pipelines.cogvideo.modeling_flax_cogvideox_vae import (
-    FlaxAutoencoderKLCogVideoXConfig,
-    FlaxAutoencoderKLCogVideoX,
-    FlaxAutoencoderKLCogVideoXCache,
-    load_cogvideox_vae,
-)
 from flax.linen import partitioning as nn_partitioning
 
 MODEL_NAME = "zai-org/CogVideoX1.5-5B"
@@ -106,137 +98,6 @@ def to_jax_recursive(x):
         return {k: to_jax_recursive(v) for k, v in x.items()}
     else:
         return x
-
-
-class VAEProxy:
-    """JAX VAE 的 PyTorch 接口代理"""
-    def __init__(self, vae, vae_cache, dtype, config, mesh=None):
-        self._vae = vae
-        self.vae_cache = vae_cache
-        self.dtype = dtype
-        self.config = config
-        self._original_sample = None
-        self._mesh = mesh
-    
-    def __getattr__(self, name):
-        return getattr(self._vae, name)
-    
-    def clear_cache(self):
-        """清理缓存的样本以释放内存"""
-        self._original_sample = None
-    
-    def encode(self, sample, *args, **kwargs):
-        """编码：PyTorch -> JAX -> 编码 -> PyTorch"""
-        # 清理之前的 sample
-        self._original_sample = None
-        # 保存原始 sample 用于 decode
-        self._original_sample = sample
-        # 转换为 JAX 并编码
-        jax_sample = to_jax_recursive(sample)
-        out = self._vae.encode(jax_sample, *args, **kwargs)
-        return to_torch_recursive(out)
-    
-    def decode(self, latents, *args, **kwargs):
-        """解码：PyTorch -> JAX -> 解码 -> PyTorch"""
-        # 应用缩放因子
-        scaling_factor = self.config.scaling_factor if hasattr(self.config, 'scaling_factor') else 0.7
-        latents = latents / scaling_factor
-        
-        # 转换 latents 为 JAX 格式
-        jax_latents = to_jax_recursive(latents)
-        
-        print(f"DEBUG: VAE decode input shape: {jax_latents.shape}")
-        print(f"DEBUG: Latent stats - min: {float(jnp.min(jax_latents)):.4f}, max: {float(jnp.max(jax_latents)):.4f}")
-        
-        # 转换格式：PyTorch (NCDHW) -> JAX (NDHWC)
-        if len(jax_latents.shape) == 5:
-            B, C, T, H, W = jax_latents.shape
-            print(f"DEBUG: Input shape (PyTorch BCTHW): [B={B}, C={C}, T={T}, H={H}, W={W}]")
-            # BCTHW -> BTHWC
-            jax_latents = jax_latents.transpose(0, 2, 3, 4, 1)
-            print(f"DEBUG: After transpose to JAX (BTHWC): {jax_latents.shape}")
-            
-            # 应用 sharding
-            if self._mesh is not None:
-                try:
-                    latent_sharding = NamedSharding(self._mesh, P(None, None, 'sp', 'tp', None))
-                    jax_latents = jax.device_put(jax_latents, latent_sharding)
-                    print(f"DEBUG: Applied sharding to latents")
-                except Exception as e:
-                    print(f"DEBUG: Could not apply sharding: {e}")
-        
-        # 准备 sample 参数
-        if self._original_sample is None:
-            # 生成模式：使用 latents 自身作为 spatial conditioning
-            jax_sample = jax_latents
-            print(f"DEBUG: Using latents as spatial conditioning: {jax_sample.shape}")
-        else:
-            # 使用保存的 sample
-            sample = self._original_sample
-            jax_sample = to_jax_recursive(sample) if hasattr(sample, 'numpy') else sample
-            
-            if hasattr(jax_sample, 'shape') and len(jax_sample.shape) == 5:
-                print(f"DEBUG: Sample shape before transpose: {jax_sample.shape}")
-                # BCTHW -> BTHWC
-                jax_sample = jax_sample.transpose(0, 2, 3, 4, 1)
-                print(f"DEBUG: Sample shape after transpose: {jax_sample.shape}")
-        
-        # 执行解码
-        out = self._vae.decode(jax_latents, sample=jax_sample)
-        
-        # 转换输出格式：JAX (NDHWC) -> PyTorch (NCDHW)
-        if hasattr(out, 'shape') and len(out.shape) == 5:
-            print(f"DEBUG: VAE output shape (JAX): {out.shape}")
-            # BTHWC -> BCTHW
-            out = out.transpose(0, 4, 1, 2, 3)
-            print(f"DEBUG: After transpose to PyTorch: {out.shape}")
-        
-        # 转换为 PyTorch 张量
-        torch_out = to_torch_recursive(out)
-        
-        print(f"DEBUG: Output stats - min: {torch_out.min().item():.4f}, max: {torch_out.max().item():.4f}")
-        
-        # 包装为 DecoderOutput
-        return DecoderOutput(sample=torch_out)
-
-
-def _add_sharding_rule(vs: nnx.VariableState, logical_axis_rules) -> nnx.VariableState:
-    """为 VAE 参数添加 sharding 规则"""
-    vs.sharding_rules = logical_axis_rules
-    return vs
-
-
-@nnx.jit(static_argnums=(1,), donate_argnums=(0,))
-def create_sharded_logical_model(model, logical_axis_rules):
-    """创建带 logical sharding 的模型"""
-    graphdef, state, rest_of_state = nnx.split(model, nnx.Param, ...)
-    p_add_sharding_rule = functools.partial(_add_sharding_rule, logical_axis_rules=logical_axis_rules)
-    state = jax.tree.map(p_add_sharding_rule, state, is_leaf=lambda x: isinstance(x, nnx.VariableState))
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    model = nnx.merge(graphdef, sharded_state, rest_of_state)
-    return model
-
-
-def sharded_device_put(tensor, sharding):
-    """将张量放置到分片设备上"""
-    if isinstance(tensor, tuple):
-        return tuple(sharded_device_put(t, sharding) for t in tensor)
-    num_global_devices = jax.device_count()
-    num_local_devices = jax.local_device_count()
-    
-    if num_global_devices == num_local_devices:
-        return jax.device_put(tensor, sharding)
-    
-    shape = tensor.shape
-    x_split = [
-        jax.device_put(tensor[i], device)
-        for device, i in sharding.addressable_devices_indices_map(shape).items()
-    ]
-    return jax.make_array_from_single_device_arrays(shape, sharding, x_split)
-
-########################################
-
 
 def setup_jax_config():
     """配置JAX环境参数"""
@@ -428,8 +289,8 @@ def _tpu_splash_attention(query, key, value, env, scale=None, is_causal=False, w
     
     # 应用输出 sharding constraint
     # 使用 NamedSharding 而不是 PartitionSpec，避免需要 mesh context
-    output_sharding = NamedSharding(mesh, P('dp', None, ('tp', 'sp'), None))
-    out = jax.lax.with_sharding_constraint(out, output_sharding)
+    # output_sharding = NamedSharding(mesh, P('dp', None, ('tp', 'sp'), None))
+    # out = jax.lax.with_sharding_constraint(out, output_sharding)
     
     return out
 
@@ -680,51 +541,12 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
     mesh_devices = mesh_utils.create_device_mesh((tp_dim, dp_dim, sp_dim), allow_split_physical_axes=True)
     mesh = Mesh(mesh_devices, ('tp', 'dp', 'sp'))
     
-    # # 初始化 JAX VAE（在创建 torchax env 之前）
-    # print("- 初始化 JAX 原生 VAE...")
-    # key = jax.random.key(0)
-    # rngs = nnx.Rngs(key)
-    
-    # # 加载 VAE 配置
-    # cog_vae_config = FlaxAutoencoderKLCogVideoX.config_class.from_config(
-    #     FlaxAutoencoderKLCogVideoX.config_class.load_config(model_id, subfolder="vae")
-    # )
-    
-    # with mesh:
-    #     # 创建 VAE 模型结构，并没有加载任何预训练参数
-    #     cog_vae = FlaxAutoencoderKLCogVideoX(config=cog_vae_config, rngs=rngs)
-    #     print(f"  VAE 模型已创建")
-        
-    #     # 创建 VAE cache
-    #     cog_vae_cache = FlaxAutoencoderKLCogVideoXCache(cog_vae)
-        
-    #     # 加载预训练权重
-    #     print("  加载 VAE 预训练权重...")
-    #     loaded_weights = load_cogvideox_vae(model_id, {}, "tpu")
-        
-    #     # 应用 sharding 并转换为 bfloat16
-    #     sharding = NamedSharding(mesh, P())
-    #     params = jax.tree_util.tree_map(lambda x: sharded_device_put(x, sharding), loaded_weights)
-    #     # params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), params)
-        
-    #     # 合并权重到模型
-    #     graphdef, _ = nnx.split(cog_vae)
-    #     cog_vae = nnx.merge(graphdef, params)
-    #     print("  VAE 权重已加载")
-        
-    #     # 应用 logical sharding
-    #     print("  应用 VAE sharding...")
-    #     cog_vae = create_sharded_logical_model(cog_vae, LOGICAL_AXIS_RULES)
-    #     print("  VAE 初始化完成")
-    
     # 创建 torchax 环境
     env = torchax.default_env()
     
     # 配置环境以启用 TPU Splash Attention
     env._mesh = mesh
     env.config.use_tpu_splash_attention = True
-    # jax_cog_vae = VAEProxy(cog_vae, cog_vae_cache, torch.bfloat16, cog_vae_config, mesh=mesh)
-    # pipe.vae = jax_cog_vae  # 替换 Pipeline 的 VAE
 
     # 注册自定义的 Scaled Dot-Product Attention
     print(f"- 注册 Splash Attention（窗口大小: {WINDOW_SIZE}）...")
@@ -788,20 +610,20 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
         torchax.interop.call_jax(jax.block_until_ready, vae_weights)
         
         # 编译transformer（DiT的核心网络）
-        pipe.transformer = torchax.compile(
-            pipe.transformer,
-            torchax.CompileOptions(
-                jax_jit_kwargs={'static_argnames': ('return_dict', )}
-            )
-        )
+        # pipe.transformer = torchax.compile(
+        #     pipe.transformer,
+        #     torchax.CompileOptions(
+        #         jax_jit_kwargs={'static_argnames': ('return_dict', )}
+        #     )
+        # )
         
         # 编译vae
-        pipe.vae = torchax.compile(
-            pipe.vae,
-            torchax.CompileOptions(
-                jax_jit_kwargs={'static_argnames': ('return_dict', )}
-            )
-        )
+        # pipe.vae = torchax.compile(
+        #     pipe.vae,
+        #     torchax.CompileOptions(
+        #         jax_jit_kwargs={'static_argnames': ('return_dict', )}
+        #     )
+        # )
         
         # 编译文本编码器
         # pipe.text_encoder = torchax.compile(pipe.text_encoder)
@@ -890,7 +712,7 @@ def main():
         frames, times = run_generation_benchmark(
             pipe,
             prompt,
-            num_inference_steps=20,
+            num_inference_steps=5,
             num_frames=1,
             num_iterations=1
         )
