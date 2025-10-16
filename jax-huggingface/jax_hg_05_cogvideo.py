@@ -610,31 +610,41 @@ def setup_pipeline_for_jax(pipe, model_id=MODEL_NAME):
         torchax.interop.call_jax(jax.block_until_ready, vae_weights)
         
         # 编译transformer（DiT的核心网络）
-        # pipe.transformer = torchax.compile(
-        #     pipe.transformer,
-        #     torchax.CompileOptions(
-        #         jax_jit_kwargs={'static_argnames': ('return_dict', )}
-        #     )
-        # )
+        pipe.transformer = torchax.compile(
+            pipe.transformer,
+            torchax.CompileOptions(
+                jax_jit_kwargs={'static_argnames': ('return_dict', )}
+            )
+        )
         
         # 编译vae
-        # pipe.vae = torchax.compile(
-        #     pipe.vae,
-        #     torchax.CompileOptions(
-        #         jax_jit_kwargs={'static_argnames': ('return_dict', )}
-        #     )
-        # )
+        pipe.vae = torchax.compile(
+            pipe.vae,
+            torchax.CompileOptions(
+                jax_jit_kwargs={'static_argnames': ('return_dict', )}
+            )
+        )
         
         # 编译文本编码器
-        # pipe.text_encoder = torchax.compile(pipe.text_encoder)
+        pipe.text_encoder = torchax.compile(pipe.text_encoder)
     
     print("Pipeline配置完成")
     return pipe, env, mesh
 
 
-def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49, num_iterations=2):
+def run_generation_benchmark(pipe, prompt, num_inference_steps=20, num_frames=49, height=56, width=104, num_iterations=2):
     """
     运行视频生成基准测试
+    
+    Args:
+        pipe: CogVideoX Pipeline
+        prompt: 提示词
+        num_inference_steps: 推理步数
+        num_frames: 视频帧数
+        height: 视频高度
+        width: 视频宽度
+        num_iterations: 迭代次数
+        
     Returns:
         frames: 最后生成的视频帧
         times: 各次迭代的时间列表
@@ -643,6 +653,7 @@ def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49
     print(f"提示词: '{prompt}'")
     print(f"推理步数: {num_inference_steps}")
     print(f"视频帧数: {num_frames}")
+    print(f"分辨率: {height}x{width}")
     
     times = []
     frames = None
@@ -654,7 +665,7 @@ def run_generation_benchmark(pipe, prompt, num_inference_steps=50, num_frames=49
             print(f"\n迭代 {i} (使用已编译代码):")
         
         start = time.perf_counter()
-        result = pipe(prompt, num_inference_steps=num_inference_steps, num_frames=num_frames)
+        result = pipe(prompt, num_inference_steps=num_inference_steps, num_frames=num_frames, height=height, width=width)
         frames = result.frames[0]  # CogVideoX 返回 frames 而不是 images
         end = time.perf_counter()
         elapsed = end - start
@@ -712,9 +723,11 @@ def main():
         frames, times = run_generation_benchmark(
             pipe,
             prompt,
-            num_inference_steps=5,
-            num_frames=1,
-            num_iterations=1
+            num_inference_steps=20,
+            num_frames=17,
+            height = 288,
+            width = 512,
+            num_iterations=2
         )
     
     print("\n 保存生成的视频...")
