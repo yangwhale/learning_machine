@@ -46,19 +46,6 @@ LOGICAL_AXIS_RULES = (
     ('conv_in', ('tp','dp','sp'))
 )
 
-#### JAX VAE 辅助函数 ####
-# 参考: diffusers/cog_tx_splash_attn.py
-
-class ConfigWrapper:
-    """配置包装器，用于模拟 PyTorch VAE 的 config 对象"""
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-    def __getitem__(self, key):
-        return getattr(self, key)
-    def __setitem__(self, key, value):
-        setattr(self, key, value)
-
-
 def to_torch_recursive(x):
     """递归地将 JAX 数组转换为 PyTorch 张量"""
     if 'ArrayImpl' in str(type(x)) or isinstance(x, jnp.ndarray):
