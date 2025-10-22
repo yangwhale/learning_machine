@@ -16,15 +16,6 @@ import logging
 MODEL_NAME = "zai-org/CogVideoX1.5-5B"
 VAE_SUBFOLDER = "vae"
 
-LOGICAL_AXIS_RULES = (
-    ('conv_out', ('tp', 'dp', 'sp')),
-    ('conv_in', ('tp', 'dp', 'sp'))
-)
-
-USE_DP = False
-SP_NUM = 1
-USE_FSDP = True
-
 def setup_pytree_registrations():
     print("注册PyTree节点...")
     def model_output_flatten(obj):
