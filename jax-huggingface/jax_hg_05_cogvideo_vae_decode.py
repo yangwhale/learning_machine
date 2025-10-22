@@ -78,7 +78,7 @@ def setup_vae_for_jax(vae):
     print("VAE配置完成")
     return vae, env, mesh
 
-def test_vae_decode_1frame(vae, env, mesh, profiler_context, num_runs, frames, height, width):
+def test_vae_decode(vae, env, mesh, profiler_context, num_runs, frames, height, width):
 
     print(f"\n开始测试 - 运行 {num_runs} 次\n")
     latent_channels = 16
@@ -145,7 +145,7 @@ def main():
         profiler_context = jax.profiler.trace("/dev/shm/jax-trace", create_perfetto_link=False)
     
     # 运行测试
-    test_vae_decode_1frame(vae, env, mesh, profiler_context, num_runs=5, frames=32, height=768, width=1360)
+    test_vae_decode(vae, env, mesh, profiler_context, num_runs=5, frames=32, height=768, width=1360)
     print("✅ 测试完成！")
 
 if __name__ == "__main__":
